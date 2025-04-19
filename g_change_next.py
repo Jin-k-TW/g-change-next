@@ -1,10 +1,11 @@
-# 🚗 G-Change Next Ver3.2
+# 🚗 G-Change Next Ver3.3
 
 import streamlit as st
 import pandas as pd
 import re
 import io
 import os
+import shutil
 
 # ページ設定
 st.set_page_config(page_title="G-Change Next", layout="wide")
@@ -17,7 +18,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # タイトル
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.2）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.3）")
 
 # --- NGリスト選択ブロック ---
 
@@ -36,40 +37,32 @@ uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアッ
 
 # --- テキスト整形ルール ---
 
-review_keywords = ["楽しい", "親切", "人柄", "感じ", "スタッフ", "雰囲気", "交流", "お世話", "ありがとう", "です", "ました", "🙇"]
-ignore_keywords = ["ウェブサイト", "ルート", "営業中", "閉店", "口コミ"]
-
 def normalize(text):
     text = str(text).strip().replace(" ", " ").replace("　", " ")
     return re.sub(r'[−–—―]', '-', text)
 
-def extract_info(lines):
-    company = normalize(lines[0]) if lines else ""
-    industry, address, phone = "", "", ""
+def extract_from_vertical_list(lines):
+    """縦型リストから企業名・業種・住所・電話番号を抽出"""
+    extracted = []
+    for i, line in enumerate(lines):
+        if re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", str(line)):
+            phone_line = normalize(str(line))
+            phone = phone_line.split("·")[0]  # 「·」で区切り、電話番号だけ
 
-    for line in lines[1:]:
-        line = normalize(line)
-        if any(kw in line for kw in ignore_keywords):
-            continue
-        if any(kw in line for kw in review_keywords):
-            continue
-        if "·" in line or "⋅" in line:
-            parts = re.split(r"[·⋅]", line)
-            industry = parts[-1].strip()
-        elif re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line):
-            phone = re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line).group()
-        elif not address and any(x in line for x in ["丁目", "町", "番", "区", "−", "-"]):
-            address = line
+            address = normalize(str(lines[i-1])) if i-1 >= 0 else ""
+            industry_line = normalize(str(lines[i-2])) if i-2 >= 0 else ""
+            industry = industry_line.split("·")[0]  # 「·」で区切り、業種だけ
 
-    return pd.Series([company, industry, address, phone])
+            company = normalize(str(lines[i-3])) if i-3 >= 0 else ""
 
-def is_company_line(line):
-    line = normalize(str(line))
-    return not any(kw in line for kw in ignore_keywords + review_keywords) and not re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line)
+            extracted.append([company, industry, address, phone])
+    return pd.DataFrame(extracted, columns=["企業名", "業種", "住所", "電話番号"])
 
 # --- 実行メインブロック ---
 
 if uploaded_file:
+    filename_no_ext = os.path.splitext(uploaded_file.name)[0]
+
     # ファイルを読み込む（まずはシート名一覧取得）
     xl = pd.ExcelFile(uploaded_file)
     sheet_names = xl.sheet_names
@@ -77,7 +70,6 @@ if uploaded_file:
     # 「入力マスター」シートがあればテンプレ型と判定
     if "入力マスター" in sheet_names:
         df = pd.read_excel(uploaded_file, sheet_name="入力マスター")
-        # 列名で「企業様名称」「業種」「住所」「電話番号」を抜き出し
         if all(col in df.columns for col in ["企業様名称", "業種", "住所", "電話番号"]):
             result_df = df[["企業様名称", "業種", "住所", "電話番号"]].copy()
             result_df.columns = ["企業名", "業種", "住所", "電話番号"]
@@ -88,22 +80,7 @@ if uploaded_file:
         # 縦型リストパターン
         df = pd.read_excel(uploaded_file, header=None)
         lines = df[0].dropna().tolist()
-
-        groups = []
-        current = []
-        for line in lines:
-            line = normalize(str(line))
-            if is_company_line(line):
-                if current:
-                    groups.append(current)
-                current = [line]
-            else:
-                current.append(line)
-        if current:
-            groups.append(current)
-
-        result_df = pd.DataFrame([extract_info(group) for group in groups],
-                                 columns=["企業名", "業種", "住所", "電話番号"])
+        result_df = extract_from_vertical_list(lines)
 
     # --- NGリスト適用処理 ---
     if selected_nglist != "なし":
@@ -121,9 +98,32 @@ if uploaded_file:
     st.success(f"✅ 整形完了：{len(result_df)}件の企業データを取得しました。")
     st.dataframe(result_df, use_container_width=True)
 
-    # --- Excel保存 ---
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        result_df.to_excel(writer, index=False, sheet_name="整形済みデータ")
-    st.download_button("📥 整形済みExcelファイルをダウンロード", data=output.getvalue(),
-                       file_name="整形済み_企業リスト.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # --- 出力処理（テンプレートに書き込み） ---
+
+    # テンプレートファイルをコピーして使用
+    template_file = "template.xlsx"
+    output_file_name = f"{filename_no_ext}リスト.xlsx"
+    shutil.copy(template_file, output_file_name)
+
+    # 出力先ファイルに書き込み
+    with pd.ExcelWriter(output_file_name, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+        workbook = writer.book
+        sheet = workbook["入力マスター"]
+
+        # 既存データをクリア（ヘッダー行以外）
+        for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+            for cell in row:
+                cell.value = None
+
+        # 新しいデータを書き込み
+        for idx, row in result_df.iterrows():
+            sheet.cell(row=idx+2, column=2, value=row["企業名"])
+            sheet.cell(row=idx+2, column=3, value=row["業種"])
+            sheet.cell(row=idx+2, column=4, value=row["住所"])
+            sheet.cell(row=idx+2, column=5, value=row["電話番号"])
+
+        workbook.save(output_file_name)
+
+    # ダウンロードボタン
+    with open(output_file_name, "rb") as f:
+        st.download_button("📥 整形済みリストをダウンロード", data=f, file_name=output_file_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

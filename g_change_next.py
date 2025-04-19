@@ -1,4 +1,4 @@
-# 🚗 G-Change Next Ver3.4
+# 🚗 G-Change Next Ver3.5
 
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # タイトル
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.4）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.5）")
 
 # --- NGリスト選択ブロック ---
 
@@ -39,11 +39,13 @@ uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアッ
 # --- テキスト整形ルール ---
 
 def normalize(text):
+    """文字列を正規化（前後空白除去＋ハイフン統一）"""
     text = str(text).strip().replace(" ", " ").replace("　", " ")
-    return re.sub(r'[−–—―]', '-', text)
+    text = re.sub(r'[−–—―]', '-', text)
+    return text
 
 def extract_from_vertical_list(lines):
-    """縦型リストから企業名・業種・住所・電話番号を抽出（右側抽出版）"""
+    """縦型リストから企業名・業種・住所・電話番号を抽出（·の右側を抽出）"""
     extracted = []
     for i, line in enumerate(lines):
         if re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", str(line)):
@@ -63,6 +65,10 @@ def extract_from_vertical_list(lines):
 
             extracted.append([company, industry, address, phone])
     return pd.DataFrame(extracted, columns=["企業名", "業種", "住所", "電話番号"])
+
+def clean_dataframe(df):
+    """データフレーム内のすべての値から前後空白を除去"""
+    return df.applymap(lambda x: str(x).strip() if pd.notnull(x) else x)
 
 # --- 実行メインブロック ---
 
@@ -88,12 +94,15 @@ if uploaded_file:
         lines = df[0].dropna().tolist()
         result_df = extract_from_vertical_list(lines)
 
+    # --- データクリーニング（空白除去） ---
+    result_df = clean_dataframe(result_df)
+
     # --- NGリスト適用処理 ---
     if selected_nglist != "なし":
         nglist_df = pd.read_excel(f"{selected_nglist}.xlsx")
 
-        ng_companies = nglist_df.iloc[:, 0].dropna().astype(str).tolist()
-        ng_phones = nglist_df.iloc[:, 1].dropna().astype(str).tolist()
+        ng_companies = nglist_df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+        ng_phones = nglist_df.iloc[:, 1].dropna().astype(str).str.strip().tolist()
 
         # 部分一致（企業名）フィルタ
         result_df = result_df[~result_df["企業名"].apply(lambda x: any(ng_name in str(x) for ng_name in ng_companies))]
@@ -111,16 +120,16 @@ if uploaded_file:
     output_file_name = f"{filename_no_ext}リスト.xlsx"
     shutil.copy(template_file, output_file_name)
 
-    # openpyxlで書き込み（画像など無視して保存可能）
+    # openpyxlで書き込み（画像無視でOK）
     workbook = load_workbook(output_file_name)
     sheet = workbook["入力マスター"]
 
-    # 既存データをクリア（ヘッダー行以外）
+    # 既存データをクリア（ヘッダー行以外、B列以降のみ）
     for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-        for cell in row:
+        for cell in row[1:]:  # B列以降
             cell.value = None
 
-    # 新しいデータを書き込み
+    # 新しいデータを書き込み（詰めて連続書き込み）
     for idx, row in result_df.iterrows():
         sheet.cell(row=idx+2, column=2, value=row["企業名"])
         sheet.cell(row=idx+2, column=3, value=row["業種"])

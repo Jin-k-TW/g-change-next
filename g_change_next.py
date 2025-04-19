@@ -1,4 +1,4 @@
-# 🚗 G-Change Next Ver3.3
+# 🚗 G-Change Next Ver3.4
 
 import streamlit as st
 import pandas as pd
@@ -6,6 +6,7 @@ import re
 import io
 import os
 import shutil
+from openpyxl import load_workbook
 
 # ページ設定
 st.set_page_config(page_title="G-Change Next", layout="wide")
@@ -18,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # タイトル
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.3）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.4）")
 
 # --- NGリスト選択ブロック ---
 
@@ -42,16 +43,21 @@ def normalize(text):
     return re.sub(r'[−–—―]', '-', text)
 
 def extract_from_vertical_list(lines):
-    """縦型リストから企業名・業種・住所・電話番号を抽出"""
+    """縦型リストから企業名・業種・住所・電話番号を抽出（右側抽出版）"""
     extracted = []
     for i, line in enumerate(lines):
         if re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", str(line)):
             phone_line = normalize(str(line))
-            phone = phone_line.split("·")[0]  # 「·」で区切り、電話番号だけ
+            phone_parts = phone_line.split("·")
+            phone = phone_parts[-1].strip() if len(phone_parts) > 1 else phone_line.strip()
 
-            address = normalize(str(lines[i-1])) if i-1 >= 0 else ""
+            address_line = normalize(str(lines[i-1])) if i-1 >= 0 else ""
+            address_parts = address_line.split("·")
+            address = address_parts[-1].strip() if len(address_parts) > 1 else address_line.strip()
+
             industry_line = normalize(str(lines[i-2])) if i-2 >= 0 else ""
-            industry = industry_line.split("·")[0]  # 「·」で区切り、業種だけ
+            industry_parts = industry_line.split("·")
+            industry = industry_parts[-1].strip() if len(industry_parts) > 1 else industry_line.strip()
 
             company = normalize(str(lines[i-3])) if i-3 >= 0 else ""
 
@@ -105,24 +111,23 @@ if uploaded_file:
     output_file_name = f"{filename_no_ext}リスト.xlsx"
     shutil.copy(template_file, output_file_name)
 
-    # 出力先ファイルに書き込み
-    with pd.ExcelWriter(output_file_name, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-        workbook = writer.book
-        sheet = workbook["入力マスター"]
+    # openpyxlで書き込み（画像など無視して保存可能）
+    workbook = load_workbook(output_file_name)
+    sheet = workbook["入力マスター"]
 
-        # 既存データをクリア（ヘッダー行以外）
-        for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-            for cell in row:
-                cell.value = None
+    # 既存データをクリア（ヘッダー行以外）
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+        for cell in row:
+            cell.value = None
 
-        # 新しいデータを書き込み
-        for idx, row in result_df.iterrows():
-            sheet.cell(row=idx+2, column=2, value=row["企業名"])
-            sheet.cell(row=idx+2, column=3, value=row["業種"])
-            sheet.cell(row=idx+2, column=4, value=row["住所"])
-            sheet.cell(row=idx+2, column=5, value=row["電話番号"])
+    # 新しいデータを書き込み
+    for idx, row in result_df.iterrows():
+        sheet.cell(row=idx+2, column=2, value=row["企業名"])
+        sheet.cell(row=idx+2, column=3, value=row["業種"])
+        sheet.cell(row=idx+2, column=4, value=row["住所"])
+        sheet.cell(row=idx+2, column=5, value=row["電話番号"])
 
-        workbook.save(output_file_name)
+    workbook.save(output_file_name)
 
     # ダウンロードボタン
     with open(output_file_name, "rb") as f:

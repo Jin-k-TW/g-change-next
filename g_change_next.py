@@ -1,4 +1,4 @@
-# 🚗 G-Change Next Ver3.5
+# 🚗 G-Change Next Ver3.7
 
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # タイトル
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.5）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.7）")
 
 # --- NGリスト選択ブロック ---
 
@@ -70,6 +70,18 @@ def clean_dataframe(df):
     """データフレーム内のすべての値から前後空白を除去"""
     return df.applymap(lambda x: str(x).strip() if pd.notnull(x) else x)
 
+def remove_phone_duplicates(df):
+    """電話番号重複削除（最初の1件だけ残す。空欄除外）"""
+    seen_phones = set()
+    cleaned_rows = []
+    for _, row in df.iterrows():
+        phone = str(row["電話番号"]).strip()
+        if phone == "" or phone not in seen_phones:
+            cleaned_rows.append(row)
+            if phone != "":
+                seen_phones.add(phone)
+    return pd.DataFrame(cleaned_rows)
+
 # --- 実行メインブロック ---
 
 if uploaded_file:
@@ -97,7 +109,12 @@ if uploaded_file:
     # --- データクリーニング（空白除去） ---
     result_df = clean_dataframe(result_df)
 
+    original_count = len(result_df)
+
     # --- NGリスト適用処理 ---
+    company_removed = 0
+    phone_removed = 0
+
     if selected_nglist != "なし":
         nglist_df = pd.read_excel(f"{selected_nglist}.xlsx")
 
@@ -105,13 +122,25 @@ if uploaded_file:
         ng_phones = nglist_df.iloc[:, 1].dropna().astype(str).str.strip().tolist()
 
         # 部分一致（企業名）フィルタ
+        before_company = len(result_df)
         result_df = result_df[~result_df["企業名"].apply(lambda x: any(ng_name in str(x) for ng_name in ng_companies))]
+        after_company = len(result_df)
+        company_removed = before_company - after_company
 
         # 完全一致（電話番号）フィルタ
+        before_phone = len(result_df)
         result_df = result_df[~result_df["電話番号"].astype(str).isin(ng_phones)]
+        after_phone = len(result_df)
+        phone_removed = before_phone - after_phone
+
+    # --- 重複電話番号を除去 ---
+    result_df = remove_phone_duplicates(result_df)
 
     st.success(f"✅ 整形完了：{len(result_df)}件の企業データを取得しました。")
     st.dataframe(result_df, use_container_width=True)
+
+    if selected_nglist != "なし":
+        st.info(f"🛡️ 【NGリスト削除件数】\n\n企業名による削除：{company_removed}件\n電話番号による削除：{phone_removed}件")
 
     # --- 出力処理（テンプレートに書き込み） ---
 
@@ -124,12 +153,12 @@ if uploaded_file:
     workbook = load_workbook(output_file_name)
     sheet = workbook["入力マスター"]
 
-    # 既存データをクリア（ヘッダー行以外、B列以降のみ）
+    # 既存データをクリア（B列以降のみ）
     for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
         for cell in row[1:]:  # B列以降
             cell.value = None
 
-    # 新しいデータを書き込み（詰めて連続書き込み）
+    # 新しいデータを書き込み（2行目から順に連続で詰めて書く）
     for idx, row in result_df.iterrows():
         sheet.cell(row=idx+2, column=2, value=row["企業名"])
         sheet.cell(row=idx+2, column=3, value=row["業種"])

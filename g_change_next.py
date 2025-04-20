@@ -1,4 +1,4 @@
-# 🚗 G-Change Next Ver3.7
+# 🚗 G-Change Next Ver3.8
 
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # タイトル
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.7）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver3.8）")
 
 # --- NGリスト選択ブロック ---
 
@@ -82,6 +82,10 @@ def remove_phone_duplicates(df):
                 seen_phones.add(phone)
     return pd.DataFrame(cleaned_rows)
 
+def remove_empty_rows(df):
+    """企業名・業種・住所・電話番号がすべて空の行を除去"""
+    return df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))]
+
 # --- 実行メインブロック ---
 
 if uploaded_file:
@@ -135,6 +139,9 @@ if uploaded_file:
 
     # --- 重複電話番号を除去 ---
     result_df = remove_phone_duplicates(result_df)
+
+    # --- 最後に空行を除去 ---
+    result_df = remove_empty_rows(result_df)
 
     st.success(f"✅ 整形完了：{len(result_df)}件の企業データを取得しました。")
     st.dataframe(result_df, use_container_width=True)

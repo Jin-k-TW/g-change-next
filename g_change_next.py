@@ -53,7 +53,7 @@ def extract_company_groups(lines):
             industry = ""
             company = ""
 
-            for back_line in reversed(buffer[:-1]):
+            for back_line in reversed(buffer[:-1][-6:]):
                 if not address and any(x in back_line for x in ["丁目", "区", "市", "番地", "-", "−"]):
                     address = back_line
                 elif not industry and any(x in back_line for x in ["プラスチック", "製造", "加工", "業", "サービス"]):
@@ -143,6 +143,9 @@ if uploaded_file:
     shutil.copy(template_file, output_file_name)
 
     workbook = load_workbook(output_file_name)
+    if "入力マスター" not in workbook.sheetnames:
+        st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
+        st.stop()
     sheet = workbook["入力マスター"]
     for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
         for cell in row[1:]:

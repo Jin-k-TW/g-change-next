@@ -3,8 +3,8 @@ import pandas as pd
 import re
 import io
 import os
-import shutil
 from openpyxl import load_workbook
+from openpyxl.writer.excel import save_virtual_workbook
 
 # ページ設定
 st.set_page_config(page_title="G-Change Next", layout="wide")
@@ -16,7 +16,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.1 強化版）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.2 安定版）")
 
 # --- NGリスト選択 ---
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
@@ -118,51 +118,3 @@ if uploaded_file:
         ng_phones = ng_df.iloc[:, 1].dropna().astype(str).str.strip().tolist()
 
         before_company = len(result_df)
-        result_df = result_df[~result_df["企業名"].apply(lambda x: any(ng in str(x) for ng in ng_companies))]
-        company_removed = before_company - len(result_df)
-
-        before_phone = len(result_df)
-        result_df = result_df[~result_df["電話番号"].astype(str).isin(ng_phones)]
-        phone_removed = before_phone - len(result_df)
-
-    result_df = remove_phone_duplicates(result_df)
-    result_df = remove_empty_rows(result_df)
-    result_df = result_df.sort_values(by="電話番号", na_position='last').reset_index(drop=True)
-
-    st.success(f"✅ 整形完了：{len(result_df)}件の企業データを取得しました。")
-    st.dataframe(result_df, use_container_width=True)
-
-    if selected_nglist != "なし":
-        st.info(f"🛡️ 【NGリスト削除件数】\n\n企業名による削除：{company_removed}件\n電話番号による削除：{phone_removed}件")
-
-    template_file = "template.xlsx"
-    output_file_name = f"{filename_no_ext}リスト.xlsx"
-    if not os.path.exists(template_file):
-        st.error("❌ template.xlsx が存在しません")
-        st.stop()
-    shutil.copy(template_file, output_file_name)
-
-    workbook = load_workbook(output_file_name)
-    if "入力マスター" not in workbook.sheetnames:
-        st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
-        st.stop()
-    sheet = workbook["入力マスター"]
-    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-        for cell in row[1:]:
-            cell.value = None
-
-    for idx, row in result_df.iterrows():
-        sheet.cell(row=idx+2, column=2, value=row["企業名"])
-        sheet.cell(row=idx+2, column=3, value=row["業種"])
-        sheet.cell(row=idx+2, column=4, value=row["住所"])
-        sheet.cell(row=idx+2, column=5, value=row["電話番号"])
-
-    workbook.save(output_file_name)
-
-    with open(output_file_name, "rb") as f:
-        st.download_button(
-            label="📥 整形済みリストをダウンロード",
-            data=f.read(),
-            file_name=output_file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )

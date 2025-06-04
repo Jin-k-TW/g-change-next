@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import io
 import os
+import unicodedata
 from openpyxl import load_workbook
 
 # ページ設定
@@ -15,7 +16,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.3 強化版）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.4 安定版）")
 
 # --- NGリスト選択 ---
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
@@ -31,26 +32,42 @@ def normalize(text):
         return ""
     text = str(text).strip().replace("\u3000", " ").replace("\xa0", " ")
     text = re.sub(r'[−–—―]', '-', text)
+    text = unicodedata.normalize("NFKC", text)  # ← カタカナの全半角吸収対応
     return text
 
-def extract_phone(line):
-    match = re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line)
-    return match.group() if match else ""
-
-def extract_industry(line):
-    parts = re.split(r"[·・]", line)
-    return parts[-1].strip() if len(parts) > 1 else line.strip()
+def is_phone(line):
+    return re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line)
 
 def extract_company_groups(lines):
     results = []
-    lines = [normalize(l) for l in lines if l and normalize(l)]
-    for i, line in enumerate(lines):
-        if extract_phone(line):
-            phone = extract_phone(line)
-            address = lines[i - 1] if i - 1 >= 0 else ""
-            industry = extract_industry(lines[i - 2]) if i - 2 >= 0 else ""
-            company = lines[i - 3] if i - 3 >= 0 else ""
+    buffer = []
+    for line in lines:
+        line = normalize(str(line))
+        if not line or line in ["ルート", "ユーザーサイト"]:
+            continue
+        buffer.append(line)
+        if is_phone(line):
+            phone_match = re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line)
+            phone = phone_match.group() if phone_match else ""
+
+            address = ""
+            industry = ""
+            company = ""
+
+            for back_line in reversed(buffer[:-1][-6:]):
+                if not address and any(x in back_line for x in ["丁目", "区", "市", "番地", "-", "−"]):
+                    address = back_line
+                elif not industry and any(x in back_line for x in ["プラスチック", "製造", "加工", "業", "サービス"]):
+                    industry = back_line
+                elif not company:
+                    company = back_line
+
+            # 業種のレビュー除去対応（· より後ろだけ取得）
+            if "·" in industry:
+                industry = industry.split("·")[-1].strip()
+
             results.append([company, industry, address, phone])
+            buffer.clear()
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
 def clean_dataframe(df):
@@ -102,15 +119,15 @@ if uploaded_file:
         if ng_df.shape[1] < 2:
             st.error("❌ NGリストは2列以上必要です（企業名、電話番号）")
             st.stop()
-        ng_companies = ng_df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
-        ng_phones = ng_df.iloc[:, 1].dropna().astype(str).str.strip().tolist()
+        ng_companies = ng_df.iloc[:, 0].dropna().astype(str).apply(normalize).tolist()
+        ng_phones = ng_df.iloc[:, 1].dropna().astype(str).apply(normalize).tolist()
 
         before_company = len(result_df)
-        result_df = result_df[~result_df["企業名"].apply(lambda x: any(ng in str(x) for ng in ng_companies))]
+        result_df = result_df[~result_df["企業名"].apply(lambda x: any(ng in normalize(x) for ng in ng_companies))]
         company_removed = before_company - len(result_df)
 
         before_phone = len(result_df)
-        result_df = result_df[~result_df["電話番号"].astype(str).isin(ng_phones)]
+        result_df = result_df[~result_df["電話番号"].apply(normalize).isin(ng_phones)]
         phone_removed = before_phone - len(result_df)
 
     result_df = remove_phone_duplicates(result_df)

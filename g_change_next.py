@@ -5,6 +5,7 @@ import io
 import os
 import unicodedata
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 
 # ページ設定
 st.set_page_config(page_title="G-Change Next", layout="wide")
@@ -16,12 +17,34 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.3 強化版）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.4 強化版）")
 
 # --- NGリスト選択 ---
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
 nglist_options = ["なし"] + [os.path.splitext(f)[0] for f in nglist_files]
 selected_nglist = st.selectbox("🛡️ 使用するNGリストを選択してください", nglist_options)
+
+# --- 業種フィルター選択 ---
+st.markdown("### 🏭 業種カテゴリを選択してください")
+industry_option = st.radio(
+    "どの業種カテゴリーに該当しますか？",
+    ("製造業", "物流業", "その他")
+)
+
+# フィルター定義
+remove_exact = [
+    "オフィス機器レンタル業", "足場レンタル会社", "電気工", "廃棄物リサイクル業",
+    "プロパン販売業者", "看板専門店", "給水設備工場", "警備業", "建設会社",
+    "工務店", "写真店", "人材派遣業", "整備店", "倉庫", "肉店", "米販売店",
+    "スーパーマーケット", "ロジスティクスサービス", "建材店",
+    "自動車整備工場", "自動車販売店", "車体整備店", "協会/組織", "建設請負業者"
+]
+remove_partial = ["販売店", "販売業者"]
+
+highlight_partial = [
+    "運輸", "ロジスティクスサービス", "倉庫", "輸送サービス",
+    "運送会社企業のオフィス", "運送会社"
+]
 
 # --- ファイルアップロード ---
 uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアップロード", type=["xlsx"])
@@ -34,6 +57,13 @@ def normalize(text):
     text = re.sub(r'[−–—―]', '-', text)
     text = unicodedata.normalize("NFKC", text)
     return text
+
+def clean_address(address):
+    address = normalize(address)
+    split_pattern = r"[·･・]"
+    if re.search(split_pattern, address):
+        return re.split(split_pattern, address)[-1].strip()
+    return address
 
 def extract_phone(line):
     match = re.search(r"\d{2,4}-\d{2,4}-\d{3,4}", line)
@@ -72,14 +102,6 @@ def remove_phone_duplicates(df):
 def remove_empty_rows(df):
     return df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))]
 
-# 住所用：中点や類似記号の前を削除
-def clean_address(address):
-    address = normalize(address)
-    split_pattern = r"[·･・]"
-    if re.search(split_pattern, address):
-        return re.split(split_pattern, address)[-1].strip()
-    return address
-
 # --- 実行メインブロック ---
 if uploaded_file:
     filename_no_ext = os.path.splitext(uploaded_file.name)[0]
@@ -91,7 +113,7 @@ if uploaded_file:
         result_df = pd.DataFrame({
             "企業名": df_raw.iloc[:, 1].astype(str).apply(normalize),
             "業種": df_raw.iloc[:, 2].astype(str).apply(normalize),
-            "住所": df_raw.iloc[:, 3].astype(str).apply(clean_address),  # ← ここを修正
+            "住所": df_raw.iloc[:, 3].astype(str).apply(clean_address),
             "電話番号": df_raw.iloc[:, 4].astype(str).apply(normalize)
         })
     else:
@@ -101,6 +123,24 @@ if uploaded_file:
 
     result_df = clean_dataframe(result_df)
 
+    # --- 業種フィルター処理 ---
+    if industry_option == "製造業":
+        before = len(result_df)
+        result_df = result_df[~result_df["業種"].isin(remove_exact)]
+        result_df = result_df[~result_df["業種"].str.contains("|".join(remove_partial), na=False)]
+        st.warning(f"🏭 製造業フィルター適用：{before - len(result_df)}件を除外しました")
+
+    elif industry_option == "物流業":
+        def highlight_logistics(val):
+            if any(word in val for word in highlight_partial):
+                return "background-color: red"
+            return ""
+        styled_df = result_df.style.applymap(highlight_logistics, subset=["業種"])
+        st.info("🚚 業種が一致したセルを赤くハイライトしています（出力にも反映）")
+    else:
+        styled_df = result_df
+
+    # --- NGリスト処理 ---
     company_removed = 0
     phone_removed = 0
     if selected_nglist != "なし":
@@ -128,11 +168,16 @@ if uploaded_file:
     result_df = result_df.sort_values(by="電話番号", na_position='last').reset_index(drop=True)
 
     st.success(f"✅ 整形完了：{len(result_df)}件の企業データを取得しました。")
-    st.dataframe(result_df, use_container_width=True)
+
+    if industry_option == "物流業":
+        st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.dataframe(result_df, use_container_width=True)
 
     if selected_nglist != "なし":
         st.info(f"🛡️ 【NGリスト削除件数】\n\n企業名による削除：{company_removed}件\n電話番号による削除：{phone_removed}件")
 
+    # --- Excel出力処理 ---
     template_file = "template.xlsx"
     if not os.path.exists(template_file):
         st.error("❌ template.xlsx が存在しません")
@@ -148,11 +193,16 @@ if uploaded_file:
         for cell in row[1:]:
             cell.value = None
 
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
     for idx, row in result_df.iterrows():
         sheet.cell(row=idx+2, column=2, value=row["企業名"])
         sheet.cell(row=idx+2, column=3, value=row["業種"])
         sheet.cell(row=idx+2, column=4, value=row["住所"])
         sheet.cell(row=idx+2, column=5, value=row["電話番号"])
+        if industry_option == "物流業":
+            if any(word in row["業種"] for word in highlight_partial):
+                sheet.cell(row=idx+2, column=3).fill = red_fill
 
     output = io.BytesIO()
     workbook.save(output)

@@ -72,6 +72,14 @@ def remove_phone_duplicates(df):
 def remove_empty_rows(df):
     return df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))]
 
+# 住所用：中点や類似記号の前を削除
+def clean_address(address):
+    address = normalize(address)
+    split_pattern = r"[·･・]"
+    if re.search(split_pattern, address):
+        return re.split(split_pattern, address)[-1].strip()
+    return address
+
 # --- 実行メインブロック ---
 if uploaded_file:
     filename_no_ext = os.path.splitext(uploaded_file.name)[0]
@@ -83,7 +91,7 @@ if uploaded_file:
         result_df = pd.DataFrame({
             "企業名": df_raw.iloc[:, 1].astype(str).apply(normalize),
             "業種": df_raw.iloc[:, 2].astype(str).apply(normalize),
-            "住所": df_raw.iloc[:, 3].astype(str).apply(normalize),
+            "住所": df_raw.iloc[:, 3].astype(str).apply(clean_address),  # ← ここを修正
             "電話番号": df_raw.iloc[:, 4].astype(str).apply(normalize)
         })
     else:

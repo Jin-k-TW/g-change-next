@@ -16,7 +16,7 @@ st.markdown("""
     h1 { color: #800000; }
     </style>
 """, unsafe_allow_html=True)
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.6 + 縦積み詳細プロファイル）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.6 + 縦積み詳細プロファイル・修正版）")
 
 # =========================
 # ユーティリティ（正規化系）
@@ -163,49 +163,85 @@ def extract_company_groups_legacy(lines):
             results.append([company, industry, address, phone])
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
+# ★ 修正版：縦積み詳細（ラベル付き）
 def extract_vertical_labeled(df_like: pd.DataFrame) -> pd.DataFrame:
     """
-    新規：縦積み詳細（ラベル付き）形式を抽出。
-    想定：2列（左：ラベルor企業名、右：値）。企業名行は右がNaN/空で、左に社名。
+    縦積み詳細（ラベル付き）形式を抽出。
+    想定：2列（左：ラベルor企業名、右：値）。企業名行は右が空で、左に社名。
     以降「住所」「電話」「業種」などのラベル行が続く。
+    ※ FAX/資本金/従業員数/設立年月 などで右が空の行を企業名と誤認しないようにガード。
     """
-    # ヘッダー行をデータとして扱うため header=None 推奨
     df = df_like.copy()
     if df.columns.size > 2:
-        # 2列超のときは最初の2列だけを見る（安全サイド）
         df = df.iloc[:, :2]
     df.columns = ["col0", "col1"]
     df["col0"] = df["col0"].map(normalize_text)
     df["col1"] = df["col1"].map(normalize_text)
 
-    label_candidates = {"住所": "住所", "電話": "電話番号", "TEL": "電話番号", "Tel": "電話番号", "tel": "電話番号", "業種": "業種"}
+    def norm_label(s: str) -> str:
+        s = (s or "")
+        s = re.sub(r"[：:]\s*$", "", s)  # 行末コロン類を除去（例：業種：）
+        return s
+
+    # 値を取りたいラベル → どの列へ入れるか
+    label_to_field = {
+        "住所": "住所",
+        "所在地": "住所",
+        "本社所在地": "住所",
+
+        "電話": "電話番号",
+        "電話番号": "電話番号",
+        "TEL": "電話番号",
+        "Tel": "電話番号",
+        "tel": "電話番号",
+
+        "業種": "業種",
+        "事業内容": "業種",
+        "産業分類": "業種",
+        "製造業種": "業種",
+    }
+
+    # 企業名ではない“ラベル行”（右が空でも企業開始にしない）
+    non_company_labels = set([
+        "住所","所在地","本社所在地",
+        "電話","電話番号","TEL","Tel","tel",
+        "FAX","ＦＡＸ",
+        "資本金","資本金（千円）","資本金(千円)",
+        "従業員数","設立年月",
+        "業種","事業内容","産業分類","製造業種"
+    ])
+
     current = {"企業名": "", "住所": "", "電話番号": "", "業種": ""}
     out = []
 
     def flush_current():
-        if any(current.values()) and current["企業名"]:
-            out.append([current["企業名"], current["業種"], current["住所"], normalize_phone(current["電話番号"])])
-        # リセット
+        if current["企業名"]:
+            out.append([
+                current["企業名"],
+                current["業種"],
+                current["住所"],
+                normalize_phone(current["電話番号"])
+            ])
         current["企業名"] = ""
         current["住所"] = ""
         current["電話番号"] = ""
         current["業種"] = ""
 
     for _, row in df.iterrows():
-        left = row["col0"]
+        left = norm_label(row["col0"])
         right = row["col1"]
 
-        # 企業名の開始条件：右が空で、左が非空、かつラベル語でない
-        if left and (right == "" or right is None) and left not in label_candidates.keys():
-            # 既に積んでいるものがあれば確定
+        # --- 企業名行の検出 ---
+        # 右が空 かつ 左が非空 かつ ラベル候補ではない → 企業開始
+        if left and (right == "" or right is None) and left not in non_company_labels:
             if current["企業名"]:
                 flush_current()
             current["企業名"] = left
             continue
 
-        # ラベル行
-        if left in label_candidates:
-            key = label_candidates[left]
+        # --- ラベル行（値あり） ---
+        if left in label_to_field and right:
+            key = label_to_field[left]
             if key == "住所":
                 current["住所"] = clean_address(right)
             elif key == "電話番号":
@@ -214,9 +250,9 @@ def extract_vertical_labeled(df_like: pd.DataFrame) -> pd.DataFrame:
                 current["業種"] = extract_industry(right)
             continue
 
-        # それ以外のラベルは無視（資本金やFAX等）
+        # それ以外（FAX/資本金/従業員数/設立年月など）は無視
+        # （non_company_labels に含め済みなので企業名誤認を防止）
 
-    # 最終行 flush
     if current["企業名"]:
         flush_current()
 
@@ -228,7 +264,7 @@ def auto_detect_and_extract(xl: pd.ExcelFile) -> pd.DataFrame:
     それ以外は従来ロジック（入力マスター or 1列縦）へ。
     """
     sheet_names = xl.sheet_names
-    # まず「入力マスター」優先（従来互換）
+    # 入力マスター優先（従来互換）
     if "入力マスター" in sheet_names:
         df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
         return pd.DataFrame({
@@ -238,9 +274,8 @@ def auto_detect_and_extract(xl: pd.ExcelFile) -> pd.DataFrame:
             "電話番号": df_raw.iloc[:, 4].astype(str).map(normalize_phone)
         })
 
-    # 先頭シートを header=None で読んで、縦積み判定
+    # 先頭シートで縦積み判定
     df0 = pd.read_excel(xl, sheet_name=sheet_names[0], header=None).fillna("")
-    # 縦積み判定：2列以上 かつ 左列に「住所/電話/業種」ラベルが頻出
     left_values = df0.iloc[:, 0].astype(str).tolist()
     label_hits = sum(v in ["住所", "電話", "TEL", "Tel", "tel", "業種"] for v in left_values)
     if df0.shape[1] >= 2 and label_hits >= 2:
@@ -269,7 +304,6 @@ if uploaded_file:
         result_df = auto_detect_and_extract(xl)
 
     elif profile == "縦積み詳細（ラベル付き）":
-        # 明示指定：先頭シートを header=None で読み、縦積み抽出
         df0 = pd.read_excel(xl, sheet_name=sheet_names[0], header=None).fillna("")
         result_df = extract_vertical_labeled(df0)
 
@@ -289,7 +323,6 @@ if uploaded_file:
 
     # ---- 正規化（現状維持） ----
     result_df = clean_dataframe(result_df)
-    # 比較用キー
     result_df["__company_canon"] = result_df["企業名"].map(canonical_company_name)
     result_df["__phone_digits"]  = result_df["電話番号"].map(phone_digits_only)
 
@@ -312,7 +345,7 @@ if uploaded_file:
         styled_df = result_df.style.applymap(highlight_logistics, subset=["業種"])
         st.info("🚚 業種が一致したセルを赤くハイライトしています（出力にも反映）")
 
-    # ---- NGリスト適用（会社名=部分一致／電話=数字一致）＋削除ログ（現状維持） ----
+    # ---- NGリスト適用（会社名=部分一致／電話=数字一致）＋削除ログ ----
     removal_logs = []
     company_removed = 0
     phone_removed = 0
@@ -373,7 +406,7 @@ if uploaded_file:
             result_df = result_df[~hits]
         phone_removed = before - len(result_df)
 
-    # ---- 重複削除：電話（数字一致）のみ（現状維持） ----
+    # ---- 重複削除：電話（数字一致）のみ ----
     before = len(result_df)
     dup_mask = result_df["__phone_digits"].ne("").astype(bool) & result_df["__phone_digits"].duplicated(keep="first")
     if dup_mask.any():
@@ -388,21 +421,21 @@ if uploaded_file:
         result_df = result_df[~dup_mask]
     removed_by_dedup = before - len(result_df)
 
-    # ---- 空行除去・並べ替え（現状維持） ----
+    # ---- 空行除去・並べ替え ----
     result_df = remove_empty_rows(result_df)
     result_df["_phdigits"] = result_df["__phone_digits"]
     result_df["_is_empty_phone"] = (result_df["_phdigits"] == "")
     result_df = result_df.sort_values(by=["_is_empty_phone", "_phdigits", "企業名"]).drop(columns=["_phdigits","_is_empty_phone"])
     result_df = result_df.reset_index(drop=True)
 
-    # ---- 画面表示（現状維持） ----
+    # ---- 画面表示 ----
     st.success(f"✅ 整形完了：{len(result_df)}件の企業データを取得しました。")
     if industry_option == "物流業" and styled_df is not None:
         st.dataframe(styled_df, use_container_width=True)
     else:
         st.dataframe(result_df[["企業名","業種","住所","電話番号"]], use_container_width=True)
 
-    # ---- サマリー＋削除ログDL（現状維持） ----
+    # ---- サマリー＋削除ログDL ----
     with st.expander("📊 実行サマリー（詳細）"):
         st.markdown(f"""
 - フィルター除外（製造業 完全一致＋一部部分一致）: **{removed_by_industry}** 件  
@@ -421,7 +454,7 @@ if uploaded_file:
                 mime="text/csv"
             )
 
-    # ---- Excel出力（現状維持：物流ハイライトも反映） ----
+    # ---- Excel出力（物流ハイライトも反映） ----
     template_file = "template.xlsx"
     if not os.path.exists(template_file):
         st.error("❌ template.xlsx が存在しません")

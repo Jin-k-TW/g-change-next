@@ -16,7 +16,7 @@ st.markdown("""
     h1 { color: #800000; }
     </style>
 """, unsafe_allow_html=True)
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.7 固定プロファイル版）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.7.1 固定プロファイル＋物流協会修正）")
 
 # =========================
 # ユーティリティ（正規化系）
@@ -240,11 +240,21 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
-# 3) 物流協会：4列×複数行ブロック
+# 3) 物流協会：4列×複数行ブロック（★会社開始を厳格化）
 def extract_butsuryu_association(df_like: pd.DataFrame) -> pd.DataFrame:
+    """
+    想定：
+      c0: 会社名 or 施設名（営業所/センター等） or 空
+      c1: 郵便(〒) or 住所本体
+      c2: 'TEL xxx' / 'FAX xxx'
+      c3: 倉庫種別など（複数行）
+    施設名は会社開始にしない（直前会社の情報として扱う）
+    """
     df = df_like.copy()
     if df.shape[1] < 2:
         return pd.DataFrame(columns=["企業名","業種","住所","電話番号"])
+
+    # 4列に合わせる
     while df.shape[1] < 4:
         df[f"__pad{df.shape[1]}"] = ""
     df = df.iloc[:, :4]
@@ -252,7 +262,19 @@ def extract_butsuryu_association(df_like: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         df[c] = df[c].map(normalize_text)
 
-    not_company_tokens = set(["会社HP","本社営業所","営業所","東海センター","センター","支店","事業所"])
+    # 会社開始判定ルール
+    FACILITY_KEYWORDS = ["営業所","センター","支店","事業所","出張所","倉庫","デポ","物流センター","配送センター"]
+    LEGAL_KEYWORDS = ["株式会社","（株）","(株)","有限会社","合同会社","合名会社","合資会社","Inc","INC","Co.,","CO.,","Ltd","LTD","Corp","CORP"]
+
+    def looks_like_company(name: str) -> bool:
+        """法人らしい表記を含むなら True（施設ワードが含まれていたら False）"""
+        if not name:
+            return False
+        if any(k in name for k in FACILITY_KEYWORDS):
+            return False
+        if any(k in name for k in LEGAL_KEYWORDS):
+            return True
+        return False  # 安全側：法人表記が無ければ会社開始にしない
 
     out = []
     current = {"企業名":"", "住所":"", "電話番号":"", "業種_set":set()}
@@ -271,34 +293,27 @@ def extract_butsuryu_association(df_like: pd.DataFrame) -> pd.DataFrame:
         current["電話番号"] = ""
         current["業種_set"] = set()
 
-    tel_re = re.compile(r"TEL\s*([0-9\-]+)", re.IGNORECASE)
+    tel_re = re.compile(r"TEL\s*([0-9０-９\-ｰー－]+)", re.IGNORECASE)
     zip_re = re.compile(r"^〒\s*\d{3}-?\d{4}")
-
-    def is_company_start(v: str) -> bool:
-        if not v:
-            return False
-        if v in not_company_tokens:
-            return False
-        return True
 
     for _, row in df.iterrows():
         c0, c1, c2, c3 = row["c0"], row["c1"], row["c2"], row["c3"]
 
-        # 会社開始
-        if c0 and is_company_start(c0):
-            if current["企業名"]:
+        # --- 会社開始（法人らしい時のみ）---
+        if c0 and looks_like_company(c0):
+            if current["企業名"] and c0 != current["企業名"]:
                 flush_current()
             current["企業名"] = c0
 
-        # 住所（〒＋住所本体を結合）
+        # --- 住所（〒＋住所本体の連結）---
         if c1:
             if zip_re.search(c1):
                 if not current["住所"]:
                     current["住所"] = c1
-                else:
-                    if c1 not in current["住所"]:
-                        current["住所"] = f"{current['住所']} {c1}"
+                elif c1 not in current["住所"]:
+                    current["住所"] = f"{current['住所']} {c1}".strip()
             else:
+                # 住所らしいキーワード（都/道/府/県/市/区/町/村）を含む場合のみ結合
                 if any(tok in c1 for tok in ["都","道","府","県","市","区","町","村"]):
                     if current["住所"]:
                         if c1 not in current["住所"]:
@@ -306,16 +321,17 @@ def extract_butsuryu_association(df_like: pd.DataFrame) -> pd.DataFrame:
                     else:
                         current["住所"] = c1
 
-        # 電話
+        # --- 電話（最初のひとつ）---
         if c2:
             m = tel_re.search(c2)
             if m and not current["電話番号"]:
                 current["電話番号"] = m.group(1)
 
-        # 業種断片
+        # --- 業種断片（あれば集約）---
         if c3:
             current["業種_set"].add(extract_industry(c3))
 
+    # 最終 flush
     if current["企業名"]:
         flush_current()
 
@@ -343,7 +359,6 @@ if uploaded_file:
         result_df = extract_google_vertical(lines)
 
     elif profile == "シゴトアルワ検索リスト（縦積みラベル）":
-        # 先頭シートを header=None で読み2列抽出
         xl = pd.ExcelFile(uploaded_file)
         df0 = pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None).fillna("")
         result_df = extract_shigoto_arua(df0)

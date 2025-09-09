@@ -16,7 +16,7 @@ st.markdown("""
     h1 { color: #800000; }
     </style>
 """, unsafe_allow_html=True)
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.7.1 固定プロファイル＋物流協会修正）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.7.3 入力マスター優先＋固定プロファイル）")
 
 # =========================
 # ユーティリティ（正規化系）
@@ -128,7 +128,7 @@ profile = st.selectbox(
     [
         "Google検索リスト（縦読み・電話上下型）",
         "シゴトアルワ検索リスト（縦積みラベル）",
-        "物流協会リスト（4列・複数行ブロック）",
+        "日本倉庫協会リスト（4列・複数行ブロック）",  # ← 表記変更
     ],
     index=0
 )
@@ -144,7 +144,7 @@ uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアッ
 # =========================
 # 抽出ロジック（3方式）
 # =========================
-# 1) Google検索リスト：1列縦。電話行を軸に、上3行を 企業名/業種/住所 とみなす既存方式
+# 1) Google検索リスト：1列縦。電話行を軸に、上3行を 企業名/業種/住所 とみなす方式
 def extract_google_vertical(lines):
     results = []
     rows = [normalize_text(l) for l in lines if normalize_text(l)]
@@ -240,8 +240,8 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
-# 3) 物流協会：4列×複数行ブロック（★会社開始を厳格化）
-def extract_butsuryu_association(df_like: pd.DataFrame) -> pd.DataFrame:
+# 3) 日本倉庫協会：4列×複数行ブロック
+def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
     """
     想定：
       c0: 会社名 or 施設名（営業所/センター等） or 空
@@ -338,7 +338,7 @@ def extract_butsuryu_association(df_like: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, columns=["企業名","業種","住所","電話番号"])
 
 # =========================
-# 後段の共通関数
+# 共通ユーティリティ
 # =========================
 def clean_dataframe(df):
     return df.fillna("").applymap(lambda x: normalize_text(x) if pd.notnull(x) else "")
@@ -351,22 +351,32 @@ def remove_empty_rows(df):
 # =========================
 if uploaded_file:
     filename_no_ext = os.path.splitext(uploaded_file.name)[0]
+    xl = pd.ExcelFile(uploaded_file)
 
-    # --- 抽出（固定プロファイル） ---
-    if profile == "Google検索リスト（縦読み・電話上下型）":
-        df = pd.read_excel(uploaded_file, header=None).fillna("")
-        lines = df.iloc[:, 0].tolist()
-        result_df = extract_google_vertical(lines)
+    # === 入力マスター優先 ===
+    if "入力マスター" in xl.sheet_names:
+        df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
+        # template と同じ配置（B:企業名, C:業種, D:住所, E:電話）
+        result_df = pd.DataFrame({
+            "企業名": df_raw.iloc[:, 1].astype(str).map(normalize_text),
+            "業種": df_raw.iloc[:, 2].astype(str).map(normalize_text),
+            "住所": df_raw.iloc[:, 3].astype(str).map(clean_address),
+            "電話番号": df_raw.iloc[:, 4].astype(str).map(normalize_phone)
+        })
+    else:
+        # --- 抽出（固定プロファイル） ---
+        if profile == "Google検索リスト（縦読み・電話上下型）":
+            df = pd.read_excel(uploaded_file, header=None).fillna("")
+            lines = df.iloc[:, 0].tolist()
+            result_df = extract_google_vertical(lines)
 
-    elif profile == "シゴトアルワ検索リスト（縦積みラベル）":
-        xl = pd.ExcelFile(uploaded_file)
-        df0 = pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None).fillna("")
-        result_df = extract_shigoto_arua(df0)
+        elif profile == "シゴトアルワ検索リスト（縦積みラベル）":
+            df0 = pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None).fillna("")
+            result_df = extract_shigoto_arua(df0)
 
-    else:  # 物流協会
-        xl = pd.ExcelFile(uploaded_file)
-        df0 = pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None).fillna("")
-        result_df = extract_butsuryu_association(df0)
+        else:  # 日本倉庫協会
+            df0 = pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None).fillna("")
+            result_df = extract_warehouse_association(df0)
 
     # --- 正規化＆比較キー ---
     result_df = clean_dataframe(result_df)

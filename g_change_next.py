@@ -16,7 +16,7 @@ st.markdown("""
     h1 { color: #800000; }
     </style>
 """, unsafe_allow_html=True)
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.8 原文電話保持＋入力マスター優先）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.8.1 原文電話保持＋入力マスター優先）")
 
 # =========================
 # ユーティリティ（正規化系）
@@ -60,9 +60,12 @@ def canonical_company_name(name: str) -> str:
     return s
 
 # ---- 電話整形系（原文保持と数値キー） ----
-# さまざまなハイフンを許容して“原文のまま”抽出するための集合
-HYPHENS = "-‒–—―−－ー-‐﹣"
-PHONE_TOKEN_RE = re.compile(rf"(\d{{2,4}}[{HYPHENS}]?\d{{2,4}}[{HYPHENS}]?\d{{3,4}})")
+# 文字クラスに安全に入れられるようにエスケープした集合を用意
+HYPHENS = "-‒–—―−－ー‐﹣\u2011"  # 各種ハイフン＋非改行ハイフン
+HYPHENS_CLASS = re.escape(HYPHENS)
+PHONE_TOKEN_RE = re.compile(
+    rf"(\d{{2,4}}[{HYPHENS_CLASS}]?\d{{2,4}}[{HYPHENS_CLASS}]?\d{{3,4}})"
+)
 
 def pick_phone_token_raw(line: str) -> str:
     """行から“原文の電話表記”だけを抜き出す（ハイフン位置・種類は一切変更しない）"""
@@ -70,13 +73,15 @@ def pick_phone_token_raw(line: str) -> str:
     m = PHONE_TOKEN_RE.search(s)
     return m.group(1).strip() if m else ""
 
-# normalize_phone は見栄え調整用（原文保持をOFFにしたときだけ使用）
+# ハイフン統一テーブル（非改行ハイフンなども '-' に）
 Z2H_HYPHEN = str.maketrans({
-    '－':'-','ー':'-','‐':'-','-':'-','‒':'-','–':'-','—':'-','―':'-',
-    '-':'-',   # U+2011 non-breaking hyphen
-    '−':'-',   # U+2212 minus sign
-    '﹣':'-',  # U+FE63 small hyphen-minus
+    '－':'-','ー':'-','‐':'-','‒':'-','–':'-','—':'-','―':'-',
+    '\u2011':'-',   # NON-BREAKING HYPHEN
+    '−':'-',        # U+2212
+    '﹣':'-',       # U+FE63
+    '-':'-',        # ASCII
 })
+
 def normalize_phone(raw: str) -> str:
     """日本の電話番号をできる限り正確に成形（表示用）。比較は別途 digits で行う。"""
     if not raw:
@@ -208,6 +213,7 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
         df = df.iloc[:, :2]
     df.columns = ["col0", "col1"]
     df["col0"] = df["col0"].map(normalize_text)
+    # 電話セルは原文保持を優先するため normalize は遅延
     df["col1"] = df["col1"].map(lambda x: x if keep_original_phone else normalize_text(x))
 
     def norm_label(s: str) -> str:
@@ -245,7 +251,6 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
     def flush_current():
         if current["企業名"]:
             phone_val = current["電話番号"]
-            # シゴトアルワはセルが電話単体なので原文/整形を切替
             phone_display = str(phone_val).strip() if keep_original_phone else normalize_phone(phone_val)
             out.append([current["企業名"], current["業種"], current["住所"], phone_display])
         current.update({"企業名":"","住所":"","電話番号":"","業種":""})
@@ -359,7 +364,6 @@ if uploaded_file:
     # === 入力マスター優先（B:企業名/C:業種/D:住所/E:電話） ===
     if "入力マスター" in xl.sheet_names:
         df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
-        # 電話は原文保持ONなら“そのまま”、OFFなら normalize_phone
         raw_phone_series = df_raw.iloc[:, 4].astype(str)
         disp_phone_series = raw_phone_series.map(lambda v: str(v).strip() if keep_original_phone else normalize_phone(v))
         result_df = pd.DataFrame({
@@ -423,7 +427,6 @@ if uploaded_file:
             st.stop()
 
         ng_df["__ng_company_canon"] = ng_df.iloc[:, 0].map(canonical_company_name)
-        # NG電話は表記ゆれがあるため digits をキー化
         ng_df["__ng_phone_digits"]  = ng_df.iloc[:, 1].map(phone_digits_only)
 
         ng_company_keys = ng_df["__ng_company_canon"].tolist()

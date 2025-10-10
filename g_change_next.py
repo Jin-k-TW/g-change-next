@@ -16,7 +16,7 @@ st.markdown("""
     h1 { color: #800000; }
     </style>
 """, unsafe_allow_html=True)
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.7.3 入力マスター優先＋固定プロファイル）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.8 原文電話保持＋入力マスター優先）")
 
 # =========================
 # ユーティリティ（正規化系）
@@ -25,7 +25,7 @@ def nfkc(s: str) -> str:
     return unicodedata.normalize("NFKC", s)
 
 def normalize_text(x) -> str:
-    """共通の軽量正規化：NFKC、空白・各種ダッシュ統一、前後空白除去"""
+    """軽量正規化：NFKC、空白・各種ダッシュ統一、前後空白除去"""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     s = str(x).replace("\u3000", " ").replace("\xa0", " ")
@@ -59,31 +59,52 @@ def canonical_company_name(name: str) -> str:
     s = re.sub(r"[\s\-–—―‐ー・/,.·･\(\)（）\[\]{}【】＆&＋+_|]", "", s)
     return s
 
-Z2H_HYPHEN = str.maketrans({
-    '－':'-','ー':'-','‐':'-','-':'-','‒':'-','–':'-','—':'-','―':'-'
-})
+# ---- 電話整形系（原文保持と数値キー） ----
+# さまざまなハイフンを許容して“原文のまま”抽出するための集合
+HYPHENS = "-‒–—―−－ー-‐﹣"
+PHONE_TOKEN_RE = re.compile(rf"(\d{{2,4}}[{HYPHENS}]?\d{{2,4}}[{HYPHENS}]?\d{{3,4}})")
 
+def pick_phone_token_raw(line: str) -> str:
+    """行から“原文の電話表記”だけを抜き出す（ハイフン位置・種類は一切変更しない）"""
+    s = str(line or "")
+    m = PHONE_TOKEN_RE.search(s)
+    return m.group(1).strip() if m else ""
+
+# normalize_phone は見栄え調整用（原文保持をOFFにしたときだけ使用）
+Z2H_HYPHEN = str.maketrans({
+    '－':'-','ー':'-','‐':'-','-':'-','‒':'-','–':'-','—':'-','―':'-',
+    '-':'-',   # U+2011 non-breaking hyphen
+    '−':'-',   # U+2212 minus sign
+    '﹣':'-',  # U+FE63 small hyphen-minus
+})
 def normalize_phone(raw: str) -> str:
-    """表示用の軽い整形（比較は phone_digits_only を使用）"""
+    """日本の電話番号をできる限り正確に成形（表示用）。比較は別途 digits で行う。"""
     if not raw:
         return ""
-    s = nfkc(raw).translate(Z2H_HYPHEN)
+    s = nfkc(str(raw)).translate(Z2H_HYPHEN)
     s = s.replace("（", "(").replace("）", ")")
     s = re.sub(r"\s+", "", s)
-    s = re.sub(r"(\(内線.*?\)|\(代\)|\(代表\))", "", s)
+    s = re.sub(r"(内線\d+|内線|内|分機\d+|\(内線.*?\)|\(代\)|\(代表\))", "", s, flags=re.IGNORECASE)
     s = re.sub(r"^\+81", "0", s)
-    s = re.sub(r"[^\d-]", "", s)
     digits = re.sub(r"\D", "", s)
     if len(digits) < 9:
         return ""
+    def fmt(a,b,c): return f"{digits[:a]}-{digits[a:a+b]}-{digits[a+b:a+b+c]}"
+    if digits.startswith(("070","080","090","050")) and len(digits) == 11:
+        return fmt(3,4,4)
+    if digits.startswith("0120") and len(digits) == 10:
+        return fmt(4,3,3)
+    if len(digits) == 10 and digits.startswith(("03","06")):
+        return f"{digits[:2]}-{digits[2:6]}-{digits[6:]}"  # 2-4-4
     if len(digits) == 10:
-        return f"{digits[0:3]}-{digits[3:6]}-{digits[6:]}"
+        return fmt(3,3,4)
     if len(digits) == 11:
-        return f"{digits[0:3]}-{digits[3:7]}-{digits[7:]}"
-    return s
+        return fmt(3,4,4)
+    return re.sub(r"[^\d-]", "", s)
 
 def phone_digits_only(s: str) -> str:
-    return re.sub(r"\D", "", s or "")
+    """比較用の数値キー（NG照合・重複判定はこちら）"""
+    return re.sub(r"\D", "", nfkc(str(s or "")))
 
 def clean_address(address):
     address = normalize_text(address)
@@ -116,11 +137,14 @@ highlight_partial = [
 ]
 
 # =========================
-# 入力UI（固定プロファイル）
+# 入力UI
 # =========================
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
 nglist_options = ["なし"] + [os.path.splitext(f)[0] for f in nglist_files]
 selected_nglist = st.selectbox("🛡️ 使用するNGリストを選択してください", nglist_options)
+
+# 電話番号の原文保持（全プロファイルに適用）
+keep_original_phone = st.checkbox("電話番号の表記を原文のまま保持する（推奨：Google縦型）", value=True)
 
 st.markdown("### 🧭 抽出方法を選択してください")
 profile = st.selectbox(
@@ -128,7 +152,7 @@ profile = st.selectbox(
     [
         "Google検索リスト（縦読み・電話上下型）",
         "シゴトアルワ検索リスト（縦積みラベル）",
-        "日本倉庫協会リスト（4列・複数行ブロック）",  # ← 表記変更
+        "日本倉庫協会リスト（4列・複数行ブロック）",
     ],
     index=0
 )
@@ -142,31 +166,49 @@ industry_option = st.radio(
 uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアップロード", type=["xlsx"])
 
 # =========================
-# 抽出ロジック（3方式）
+# 抽出ロジック（3方式＋入力マスター優先）
 # =========================
-# 1) Google検索リスト：1列縦。電話行を軸に、上3行を 企業名/業種/住所 とみなす方式
 def extract_google_vertical(lines):
+    """
+    Google縦型：
+    - 電話行を見つけたら、直前の“住所らしい行”を取り、その上の“会社名らしい行”に紐付け
+    - 電話表示は原文保持オプションに従う
+    """
     results = []
     rows = [normalize_text(l) for l in lines if normalize_text(l)]
+    address_keywords = ["都","道","府","県","市","区","町","村"]
+    company_keywords = ["株式会社","有限会社","合同会社","合名会社","合資会社","(株)","（株）"]
     for i, line in enumerate(rows):
-        ph = normalize_phone(line)
-        if ph:
-            phone = ph
-            address = rows[i - 1] if i - 1 >= 0 else ""
-            address = clean_address(address)
-            industry = extract_industry(rows[i - 2]) if i - 2 >= 0 else ""
-            company = rows[i - 3] if i - 3 >= 0 else ""
-            results.append([company, industry, address, phone])
+        raw_token = pick_phone_token_raw(line)
+        if not raw_token:
+            continue
+        phone_display = raw_token if keep_original_phone else normalize_phone(raw_token)
+        address = ""
+        industry = ""
+        company = ""
+        # 住所探索
+        for j in range(i - 1, -1, -1):
+            if any(k in rows[j] for k in address_keywords):
+                address = rows[j]
+                # 会社名探索
+                for k in range(j - 1, -1, -1):
+                    if any(c in rows[k] for c in company_keywords):
+                        company = rows[k]
+                        if k + 1 < j:
+                            industry = extract_industry(rows[k + 1])
+                        break
+                break
+        results.append([company, industry, address, phone_display])
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
-# 2) シゴトアルワ：2列縦。左がラベル/企業名、右が値
 def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
+    """左：ラベル/企業名、右：値。電話表示は原文保持オプションに従う。"""
     df = df_like.copy()
     if df.columns.size > 2:
         df = df.iloc[:, :2]
     df.columns = ["col0", "col1"]
     df["col0"] = df["col0"].map(normalize_text)
-    df["col1"] = df["col1"].map(normalize_text)
+    df["col1"] = df["col1"].map(lambda x: x if keep_original_phone else normalize_text(x))
 
     def norm_label(s: str) -> str:
         s = (s or "")
@@ -202,35 +244,30 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
 
     def flush_current():
         if current["企業名"]:
-            out.append([
-                current["企業名"],
-                current["業種"],
-                current["住所"],
-                normalize_phone(current["電話番号"])
-            ])
-        current["企業名"] = ""
-        current["住所"] = ""
-        current["電話番号"] = ""
-        current["業種"] = ""
+            phone_val = current["電話番号"]
+            # シゴトアルワはセルが電話単体なので原文/整形を切替
+            phone_display = str(phone_val).strip() if keep_original_phone else normalize_phone(phone_val)
+            out.append([current["企業名"], current["業種"], current["住所"], phone_display])
+        current.update({"企業名":"","住所":"","電話番号":"","業種":""})
 
     for _, row in df.iterrows():
         left = norm_label(row["col0"])
         right = row["col1"]
 
-        # 企業名開始（右が空・左がラベル語でない）
+        # 企業名開始
         if left and (right == "" or right is None) and left not in non_company_labels:
             if current["企業名"]:
                 flush_current()
             current["企業名"] = left
             continue
 
-        # ラベル行（値あり）
-        if left in label_to_field and right:
+        # ラベル行
+        if left in label_to_field and right is not None:
             key = label_to_field[left]
             if key == "住所":
                 current["住所"] = clean_address(right)
             elif key == "電話番号":
-                current["電話番号"] = right
+                current["電話番号"] = right  # 後で原文/整形を切替
             elif key == "業種":
                 current["業種"] = extract_industry(right)
             continue
@@ -240,21 +277,11 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
-# 3) 日本倉庫協会：4列×複数行ブロック
 def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
-    """
-    想定：
-      c0: 会社名 or 施設名（営業所/センター等） or 空
-      c1: 郵便(〒) or 住所本体
-      c2: 'TEL xxx' / 'FAX xxx'
-      c3: 倉庫種別など（複数行）
-    施設名は会社開始にしない（直前会社の情報として扱う）
-    """
+    """日本倉庫協会：4列ブロック。電話表示は原文保持オプションに従う。"""
     df = df_like.copy()
     if df.shape[1] < 2:
         return pd.DataFrame(columns=["企業名","業種","住所","電話番号"])
-
-    # 4列に合わせる
     while df.shape[1] < 4:
         df[f"__pad{df.shape[1]}"] = ""
     df = df.iloc[:, :4]
@@ -262,19 +289,14 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         df[c] = df[c].map(normalize_text)
 
-    # 会社開始判定ルール
     FACILITY_KEYWORDS = ["営業所","センター","支店","事業所","出張所","倉庫","デポ","物流センター","配送センター"]
     LEGAL_KEYWORDS = ["株式会社","（株）","(株)","有限会社","合同会社","合名会社","合資会社","Inc","INC","Co.,","CO.,","Ltd","LTD","Corp","CORP"]
 
     def looks_like_company(name: str) -> bool:
-        """法人らしい表記を含むなら True（施設ワードが含まれていたら False）"""
-        if not name:
-            return False
-        if any(k in name for k in FACILITY_KEYWORDS):
-            return False
-        if any(k in name for k in LEGAL_KEYWORDS):
-            return True
-        return False  # 安全側：法人表記が無ければ会社開始にしない
+        if not name: return False
+        if any(k in name for k in FACILITY_KEYWORDS): return False
+        if any(k in name for k in LEGAL_KEYWORDS): return True
+        return False
 
     out = []
     current = {"企業名":"", "住所":"", "電話番号":"", "業種_set":set()}
@@ -282,56 +304,37 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
     def flush_current():
         if current["企業名"]:
             industry = "・".join([x for x in current["業種_set"] if x]) or ""
-            out.append([
-                current["企業名"],
-                industry,
-                current["住所"],
-                normalize_phone(current["電話番号"])
-            ])
-        current["企業名"] = ""
-        current["住所"] = ""
-        current["電話番号"] = ""
-        current["業種_set"] = set()
+            raw = current["電話番号"]
+            phone_display = pick_phone_token_raw(raw) if keep_original_phone else normalize_phone(raw)
+            out.append([current["企業名"], industry, current["住所"], phone_display])
+        current.update({"企業名":"", "住所":"", "電話番号":"", "業種_set":set()})
 
-    tel_re = re.compile(r"TEL\s*([0-9０-９\-ｰー－]+)", re.IGNORECASE)
+    tel_re = re.compile(r"(TEL|ＴＥＬ)\s*([0-9０-９\-ｰー－]+)", re.IGNORECASE)
     zip_re = re.compile(r"^〒\s*\d{3}-?\d{4}")
 
     for _, row in df.iterrows():
         c0, c1, c2, c3 = row["c0"], row["c1"], row["c2"], row["c3"]
 
-        # --- 会社開始（法人らしい時のみ）---
         if c0 and looks_like_company(c0):
             if current["企業名"] and c0 != current["企業名"]:
                 flush_current()
             current["企業名"] = c0
 
-        # --- 住所（〒＋住所本体の連結）---
         if c1:
             if zip_re.search(c1):
-                if not current["住所"]:
-                    current["住所"] = c1
-                elif c1 not in current["住所"]:
-                    current["住所"] = f"{current['住所']} {c1}".strip()
+                current["住所"] = c1 if not current["住所"] else f"{current['住所']} {c1}"
             else:
-                # 住所らしいキーワード（都/道/府/県/市/区/町/村）を含む場合のみ結合
                 if any(tok in c1 for tok in ["都","道","府","県","市","区","町","村"]):
-                    if current["住所"]:
-                        if c1 not in current["住所"]:
-                            current["住所"] = f"{current['住所']} {c1}".strip()
-                    else:
-                        current["住所"] = c1
+                    current["住所"] = c1 if not current["住所"] else f"{current['住所']} {c1}"
 
-        # --- 電話（最初のひとつ）---
         if c2:
             m = tel_re.search(c2)
             if m and not current["電話番号"]:
-                current["電話番号"] = m.group(1)
+                current["電話番号"] = m.group(2)
 
-        # --- 業種断片（あれば集約）---
         if c3:
             current["業種_set"].add(extract_industry(c3))
 
-    # 最終 flush
     if current["企業名"]:
         flush_current()
 
@@ -353,15 +356,17 @@ if uploaded_file:
     filename_no_ext = os.path.splitext(uploaded_file.name)[0]
     xl = pd.ExcelFile(uploaded_file)
 
-    # === 入力マスター優先 ===
+    # === 入力マスター優先（B:企業名/C:業種/D:住所/E:電話） ===
     if "入力マスター" in xl.sheet_names:
         df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
-        # template と同じ配置（B:企業名, C:業種, D:住所, E:電話）
+        # 電話は原文保持ONなら“そのまま”、OFFなら normalize_phone
+        raw_phone_series = df_raw.iloc[:, 4].astype(str)
+        disp_phone_series = raw_phone_series.map(lambda v: str(v).strip() if keep_original_phone else normalize_phone(v))
         result_df = pd.DataFrame({
             "企業名": df_raw.iloc[:, 1].astype(str).map(normalize_text),
             "業種": df_raw.iloc[:, 2].astype(str).map(normalize_text),
             "住所": df_raw.iloc[:, 3].astype(str).map(clean_address),
-            "電話番号": df_raw.iloc[:, 4].astype(str).map(normalize_phone)
+            "電話番号": disp_phone_series
         })
     else:
         # --- 抽出（固定プロファイル） ---
@@ -379,7 +384,7 @@ if uploaded_file:
             result_df = extract_warehouse_association(df0)
 
     # --- 正規化＆比較キー ---
-    result_df = clean_dataframe(result_df)
+    result_df = result_df.fillna("")
     result_df["__company_canon"] = result_df["企業名"].map(canonical_company_name)
     result_df["__phone_digits"]  = result_df["電話番号"].map(phone_digits_only)
 
@@ -402,7 +407,7 @@ if uploaded_file:
         styled_df = result_df.style.applymap(highlight_logistics, subset=["業種"])
         st.info("🚚 業種が一致したセルを赤くハイライトしています（出力にも反映）")
 
-    # --- NGリスト／重複削除／サマリー（現状維持） ---
+    # --- NGリスト／重複削除／サマリー ---
     removal_logs = []
     company_removed = 0
     phone_removed = 0
@@ -418,7 +423,8 @@ if uploaded_file:
             st.stop()
 
         ng_df["__ng_company_canon"] = ng_df.iloc[:, 0].map(canonical_company_name)
-        ng_df["__ng_phone_digits"]  = ng_df.iloc[:, 1].astype(str).map(normalize_phone).map(phone_digits_only)
+        # NG電話は表記ゆれがあるため digits をキー化
+        ng_df["__ng_phone_digits"]  = ng_df.iloc[:, 1].map(phone_digits_only)
 
         ng_company_keys = ng_df["__ng_company_canon"].tolist()
         ng_phone_set    = set([p for p in ng_df["__ng_phone_digits"].tolist() if p])
@@ -507,7 +513,7 @@ if uploaded_file:
                 mime="text/csv"
             )
 
-    # --- Excel出力（現状維持：物流ハイライトも反映） ---
+    # --- Excel出力（物流ハイライトも反映） ---
     template_file = "template.xlsx"
     if not os.path.exists(template_file):
         st.error("❌ template.xlsx が存在しません")
@@ -535,7 +541,7 @@ if uploaded_file:
         sheet.cell(row=r, column=2, value=row["企業名"])
         sheet.cell(row=r, column=3, value=row["業種"])
         sheet.cell(row=r, column=4, value=row["住所"])
-        sheet.cell(row=r, column=5, value=row["電話番号"])
+        sheet.cell(row=r, column=5, value=row["電話番号"])  # 表示は原文保持の結果
         if industry_option == "物流業" and is_logi(row["業種"]):
             sheet.cell(row=r, column=3).fill = red_fill
 

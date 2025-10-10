@@ -16,7 +16,7 @@ st.markdown("""
     h1 { color: #800000; }
     </style>
 """, unsafe_allow_html=True)
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver5.0 安全配列補正＋町名辞書対応）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver4.9 原文電話保持＋市外局番監査／入力マスター優先）")
 
 # =========================
 # ユーティリティ（正規化系）
@@ -25,7 +25,7 @@ def nfkc(s: str) -> str:
     return unicodedata.normalize("NFKC", s)
 
 def normalize_text(x) -> str:
-    """軽量正規化：NFKC、空白・各種ダッシュ統一、前後空白除去"""
+    """共通の軽量正規化：NFKC、空白・各種ダッシュ統一、前後空白除去"""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     s = str(x).replace("\u3000", " ").replace("\xa0", " ")
@@ -59,32 +59,11 @@ def canonical_company_name(name: str) -> str:
     s = re.sub(r"[\s\-–—―‐ー・/,.·･\(\)（）\[\]{}【】＆&＋+_|]", "", s)
     return s
 
-# ---- 電話抽出・整形（原文保持＋“安全”配列補正） ----
-HYPHENS = "-‒–—―−－ー‐﹣\u2011"  # 各種ハイフン＋非改行ハイフン
-HYPHENS_CLASS = re.escape(HYPHENS)
-PHONE_TOKEN_RE = re.compile(
-    rf"(\d{{2,4}}[{HYPHENS_CLASS}]?\d{{2,4}}[{HYPHENS_CLASS}]?\d{{3,4}})"
-)
-
-def pick_phone_token_raw(line: str) -> str:
-    """行から“原文の電話表記”だけを抜き出す（ハイフン位置・種類は変更しない）"""
-    s = str(line or "")
-    m = PHONE_TOKEN_RE.search(s)
-    return m.group(1).strip() if m else ""
-
-Z2H_HYPHEN = str.maketrans({
-    '－':'-','ー':'-','‒':'-','–':'-','—':'-','―':'-','‐':'-',
-    '\u2011':'-',   # NON-BREAKING HYPHEN
-    '−':'-',        # U+2212
-    '﹣':'-',       # U+FE63
-    '-':'-',        # ASCII
-})
+HYPHENS = "-‒–—―−－ー‐﹣\u2011"
+Z2H_HYPHEN = str.maketrans({c: "-" for c in HYPHENS})
 
 def phone_digits_only(s: str) -> str:
-    """比較用：数字だけ抽出（NG照合・重複判定用）"""
-    return re.sub(r"\D", "", nfkc(str(s or "")))
-
-# ※ normalize_phone は“見た目整形”用だが、今回の安全方針では使用しない（原文→必要時のみ補正）
+    return re.sub(r"\D", "", str(s or ""))
 
 def clean_address(address):
     address = normalize_text(address)
@@ -96,104 +75,6 @@ def clean_address(address):
 def extract_industry(line):
     parts = re.split(r"[·・]", normalize_text(line))
     return parts[-1].strip() if len(parts) > 1 else (normalize_text(line))
-
-# =========================
-# 市外局番DB（CSV）＋ 町名→市区町村DB（任意）
-# =========================
-AREACODE_CSV = "jp_areacodes.csv"     # 必須推奨：都道府県/市区町村→市外局番
-TOWN2CITY_CSV = "jp_town2city.csv"    # 任意：町名→市区町村（KEN_ALL から生成）
-
-_area_rows = []       # (pref, muni, area_code)
-_pref_names = []      # ["東京都", ...] 長い順
-_muni_rows = []       # (pref, muni, area_code) muni ありのみ、muni長い順
-_pref_ac_map = {}     # pref -> area_code
-_town_rows = []       # (pref, town_keyword, municipality) town長い順
-
-def load_area_code_db():
-    global _area_rows, _pref_names, _muni_rows, _pref_ac_map
-    _area_rows, _pref_names, _muni_rows, _pref_ac_map = [], [], [], {}
-    if not os.path.exists(AREACODE_CSV):
-        return False
-    df = pd.read_csv(AREACODE_CSV).fillna("")
-    for _, r in df.iterrows():
-        pref = str(r.get("prefecture", "")).strip()
-        muni = str(r.get("municipality", "")).strip()
-        ac   = str(r.get("area_code", "")).strip()
-        if not ac or not pref:
-            continue
-        if not ac.startswith("0"):
-            ac = "0" + ac
-        _area_rows.append((pref, muni, ac))
-        if not muni:
-            _pref_ac_map[pref] = ac
-    _pref_names = sorted(list({_p for _p, _, _ in _area_rows}), key=len, reverse=True)
-    _muni_rows  = sorted([(p,m,a) for (p,m,a) in _area_rows if m], key=lambda x: len(x[1]), reverse=True)
-    return True
-
-def load_town2city_db():
-    global _town_rows
-    _town_rows = []
-    if not os.path.exists(TOWN2CITY_CSV):
-        return False
-    df = pd.read_csv(TOWN2CITY_CSV).fillna("")
-    rows = []
-    for _, r in df.iterrows():
-        pref = str(r.get("prefecture","")).strip()
-        muni = str(r.get("municipality","")).strip()
-        town = str(r.get("town_keyword","")).strip()
-        if pref and town and muni:
-            rows.append((pref, town, muni))
-    # 町名の最長一致優先
-    _town_rows = sorted(rows, key=lambda x: len(x[1]), reverse=True)
-    return True
-
-_aco_loaded = load_area_code_db()
-_t2c_loaded = load_town2city_db()
-
-def _find_pref_in_address(addr: str) -> str:
-    if not _aco_loaded or not addr:
-        return ""
-    s = normalize_text(addr)
-    for pref in _pref_names:
-        if pref and pref in s:
-            return pref
-    return ""
-
-def _find_muni_in_address(addr: str, pref: str) -> str:
-    if not _aco_loaded or not addr or not pref:
-        return ""
-    s = normalize_text(addr)
-    for p, muni, _ac in _muni_rows:
-        if p == pref and muni and (muni in s):
-            return muni
-    return ""
-
-def _find_muni_by_town(addr: str, pref: str) -> str:
-    if not _t2c_loaded or not addr or not pref:
-        return ""
-    s = normalize_text(addr)
-    for p, town, muni in _town_rows:
-        if p == pref and town and (town in s):
-            return muni
-    return ""
-
-def guess_area_code_by_address(addr: str) -> str:
-    """住所→市外局番（市区町村最長一致→町名逆引き→都道府県代表）。見つからなければ空。"""
-    if not _aco_loaded or not addr:
-        return ""
-    pref = _find_pref_in_address(addr)
-    if not pref:
-        return ""
-    muni = _find_muni_in_address(addr, pref)
-    if not muni:
-        muni = _find_muni_by_town(addr, pref)
-    if muni:
-        # muni 行がある場合はそれを優先
-        for p, m, ac in _area_rows:
-            if p == pref and m == muni:
-                return ac
-    # muni 無し → 都道府県代表
-    return _pref_ac_map.get(pref, "")
 
 # =========================
 # 既存フィルター定義（現状維持）
@@ -215,14 +96,11 @@ highlight_partial = [
 ]
 
 # =========================
-# 入力UI
+# 入力UI（固定プロファイル）
 # =========================
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
 nglist_options = ["なし"] + [os.path.splitext(f)[0] for f in nglist_files]
 selected_nglist = st.selectbox("🛡️ 使用するNGリストを選択してください", nglist_options)
-
-# 原文保持は常に実施（見た目はまず原文）／下記は補正のON/OFF
-enable_area_code_fix = st.checkbox("住所と市外局番を照合し、必要な場合のみ配列（ハイフン位置）を安全に補正する", value=True)
 
 st.markdown("### 🧭 抽出方法を選択してください")
 profile = st.selectbox(
@@ -244,115 +122,41 @@ industry_option = st.radio(
 uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアップロード", type=["xlsx"])
 
 # =========================
-# 例外番号（携帯・フリーダイヤル等）の配列規則
+# 抽出ロジック（3方式）※電話は原文保持
 # =========================
-def format_service_number(digits: str) -> str | None:
-    """携帯・IP・フリーダイヤル・ナビダイヤル等を規則で成形（数字は変更しない）"""
-    if not digits:
-        return None
-    # 携帯/050/020 など（11桁想定）→ 3-4-4
-    if (digits.startswith(("070","080","090","050","020")) and len(digits) == 11):
-        return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
-    # 0120 / 0800 / 0570 / 0990（10桁）→ 4-3-3
-    if len(digits) == 10 and digits.startswith(("0120","0800","0570","0990")):
-        return f"{digits[:4]}-{digits[4:7]}-{digits[7:]}"
-    return None  # 該当なし
+# 電話らしき「原文部分」をそのまま抜く（変形しない）
+HYPHENS_CLASS = re.escape(HYPHENS)
+PHONE_TOKEN_RE = re.compile(rf"(\d{{2,4}}(?:[{HYPHENS_CLASS}\s]?\d{{2,4}}){{1,2}})")
 
-def format_by_area_code(digits: str, area_code: str) -> str | None:
-    """固定電話を市外局番の桁に合わせて配列整形（10桁前提）。"""
-    if not digits or not area_code:
-        return None
-    if len(digits) != 10:
-        return None
-    if not area_code.startswith("0"):
-        area_code = "0" + area_code
-    if not digits.startswith(area_code):
-        return None  # ★安全策：市外局番で始まらないなら整形しない
-    rest = 10 - len(area_code)
-    if rest <= 0:
-        return None
-    mid = rest - 4
-    if mid <= 0:
-        return None
-    return f"{digits[:len(area_code)]}-{digits[len(area_code):len(area_code)+mid]}-{digits[-4:]}"
+def pick_phone_token_raw(line: str) -> str:
+    s = str(line or "")
+    # 原文重視：NFKC等は掛けない。見つけた部分をそのまま返す
+    m = PHONE_TOKEN_RE.search(s)
+    return m.group(1).strip() if m else ""
 
-def reformat_phone_by_address(display_phone: str, address: str) -> tuple[str, bool, dict]:
-    """
-    入力：表示用電話（原文）・住所
-    出力： (表示用電話（補正後または原文のまま）, 変更フラグ, ログ情報)
-    - 数字は一切変更せず、配列（ハイフン位置）だけ調整
-    - 携帯/フリーダイヤル等は個別規則で整形
-    - 固定電話は住所→市外局番で整形（★digits が市外局番で始まるときだけ）
-    """
-    raw = str(display_phone or "")
-    digits = phone_digits_only(raw)
-    log = {
-        "before": raw,
-        "after": raw,
-        "reason": "",
-        "address": address or "",
-        "area_code_used": ""
-    }
-    if len(digits) < 9:
-        return raw, False, log  # 桁不足・不明瞭は触らない
-
-    # 1) 特殊番号（携帯/フリーダイヤル等）
-    svc = format_service_number(digits)
-    if svc is not None:
-        if svc != raw:
-            log.update({"after": svc, "reason": "service-format"})
-            return svc, True, log
-        return raw, False, log
-
-    # 2) 固定電話（10桁が基本）を住所→市外局番で“安全に”配列補正
-    if len(digits) == 10 and digits.startswith("0"):
-        ac = guess_area_code_by_address(address or "")
-        if ac:
-            fixed = format_by_area_code(digits, ac)  # 内部で startswith(ac) をチェック
-            if fixed and fixed != raw:
-                log.update({"after": fixed, "reason": "area-code-format", "area_code_used": ac})
-                return fixed, True, log
-
-    return raw, False, log
-
-# =========================
-# 抽出ロジック（3方式＋入力マスター優先）
-# =========================
+# 1) Google検索リスト：1列縦。電話行を軸に、上3行を 企業名/業種/住所 とみなす方式
 def extract_google_vertical(lines):
-    """Google縦型。電話は“原文のまま”抽出（補正は後段で一括適用）。"""
     results = []
-    rows = [normalize_text(l) for l in lines if normalize_text(l)]
-    address_keywords = ["都","道","府","県","市","区","町","村"]
-    company_keywords = ["株式会社","有限会社","合同会社","合名会社","合資会社","(株)","（株）"]
+    rows = [str(l) for l in lines if str(l).strip() != ""]
     for i, line in enumerate(rows):
-        raw_token = pick_phone_token_raw(line)
-        if not raw_token:
-            continue
-        phone_display = raw_token  # 原文保持
-        address = ""
-        industry = ""
-        company = ""
-        for j in range(i - 1, -1, -1):
-            if any(k in rows[j] for k in address_keywords):
-                address = rows[j]
-                for k in range(j - 1, -1, -1):
-                    if any(c in rows[k] for c in company_keywords):
-                        company = rows[k]
-                        if k + 1 < j:
-                            industry = extract_industry(rows[k + 1])
-                        break
-                break
-        results.append([company, industry, address, phone_display])
+        ph_raw = pick_phone_token_raw(line)
+        if ph_raw:
+            phone = ph_raw  # ← 原文保持
+            address = rows[i - 1] if i - 1 >= 0 else ""
+            address = clean_address(address)
+            industry = extract_industry(rows[i - 2]) if i - 2 >= 0 else ""
+            company = rows[i - 3] if i - 3 >= 0 else ""
+            results.append([company, industry, address, phone])
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
+# 2) シゴトアルワ：2列縦。左がラベル/企業名、右が値
 def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
-    """左：ラベル/企業名、右：値。電話は原文保持（補正は後段）。"""
     df = df_like.copy()
     if df.columns.size > 2:
         df = df.iloc[:, :2]
     df.columns = ["col0", "col1"]
-    df["col0"] = df["col0"].map(normalize_text)
-    df["col1"] = df["col1"]  # 原文保持
+    df["col0"] = df["col0"].map(lambda x: str(x) if pd.notnull(x) else "")
+    df["col1"] = df["col1"].map(lambda x: str(x) if pd.notnull(x) else "")
 
     def norm_label(s: str) -> str:
         s = (s or "")
@@ -388,26 +192,35 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
 
     def flush_current():
         if current["企業名"]:
-            phone_val = str(current["電話番号"]).strip()
-            out.append([current["企業名"], current["業種"], current["住所"], phone_val])
-        current.update({"企業名":"","住所":"","電話番号":"","業種":""})
+            out.append([
+                current["企業名"],
+                current["業種"],
+                current["住所"],
+                current["電話番号"]  # 原文保持
+            ])
+        current["企業名"] = ""
+        current["住所"] = ""
+        current["電話番号"] = ""
+        current["業種"] = ""
 
     for _, row in df.iterrows():
         left = norm_label(row["col0"])
         right = row["col1"]
 
+        # 企業名開始（右が空・左がラベル語でない）
         if left and (right == "" or right is None) and left not in non_company_labels:
             if current["企業名"]:
                 flush_current()
             current["企業名"] = left
             continue
 
-        if left in label_to_field and right is not None:
+        # ラベル行（値あり）
+        if left in label_to_field and right:
             key = label_to_field[left]
             if key == "住所":
                 current["住所"] = clean_address(right)
             elif key == "電話番号":
-                current["電話番号"] = right
+                current["電話番号"] = right  # 原文保持
             elif key == "業種":
                 current["業種"] = extract_industry(right)
             continue
@@ -417,25 +230,29 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
+# 3) 日本倉庫協会：4列×複数行ブロック
 def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
-    """日本倉庫協会：4列ブロック。電話は原文保持（補正は後段）。"""
     df = df_like.copy()
     if df.shape[1] < 2:
         return pd.DataFrame(columns=["企業名","業種","住所","電話番号"])
+
     while df.shape[1] < 4:
         df[f"__pad{df.shape[1]}"] = ""
     df = df.iloc[:, :4]
     df.columns = ["c0","c1","c2","c3"]
     for c in df.columns:
-        df[c] = df[c].map(normalize_text)
+        df[c] = df[c].map(lambda x: str(x) if pd.notnull(x) else "")
 
     FACILITY_KEYWORDS = ["営業所","センター","支店","事業所","出張所","倉庫","デポ","物流センター","配送センター"]
     LEGAL_KEYWORDS = ["株式会社","（株）","(株)","有限会社","合同会社","合名会社","合資会社","Inc","INC","Co.,","CO.,","Ltd","LTD","Corp","CORP"]
 
     def looks_like_company(name: str) -> bool:
-        if not name: return False
-        if any(k in name for k in FACILITY_KEYWORDS): return False
-        if any(k in name for k in LEGAL_KEYWORDS): return True
+        if not name:
+            return False
+        if any(k in name for k in FACILITY_KEYWORDS):
+            return False
+        if any(k in name for k in LEGAL_KEYWORDS):
+            return True
         return False
 
     out = []
@@ -443,13 +260,19 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 
     def flush_current():
         if current["企業名"]:
-            raw = str(current["電話番号"]).strip()
-            phone_display = pick_phone_token_raw(raw) or raw
             industry = "・".join([x for x in current["業種_set"] if x]) or ""
-            out.append([current["企業名"], industry, current["住所"], phone_display])
-        current.update({"企業名":"", "住所":"", "電話番号":"", "業種_set":set()})
+            out.append([
+                current["企業名"],
+                industry,
+                current["住所"],
+                current["電話番号"]  # 原文保持
+            ])
+        current["企業名"] = ""
+        current["住所"] = ""
+        current["電話番号"] = ""
+        current["業種_set"] = set()
 
-    tel_re = re.compile(r"(TEL|ＴＥＬ)\s*([0-9０-９\-ｰー－]+)", re.IGNORECASE)
+    tel_re = re.compile(r"(?:TEL|Tel|tel)\s*([0-9０-９\-ｰー－\s]+)")
     zip_re = re.compile(r"^〒\s*\d{3}-?\d{4}")
 
     for _, row in df.iterrows():
@@ -462,15 +285,22 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 
         if c1:
             if zip_re.search(c1):
-                current["住所"] = c1 if not current["住所"] else f"{current['住所']} {c1}"
+                if not current["住所"]:
+                    current["住所"] = c1
+                elif c1 not in current["住所"]:
+                    current["住所"] = f"{current['住所']} {c1}".strip()
             else:
                 if any(tok in c1 for tok in ["都","道","府","県","市","区","町","村"]):
-                    current["住所"] = c1 if not current["住所"] else f"{current['住所']} {c1}"
+                    if current["住所"]:
+                        if c1 not in current["住所"]:
+                            current["住所"] = f"{current['住所']} {c1}".strip()
+                    else:
+                        current["住所"] = c1
 
         if c2:
             m = tel_re.search(c2)
             if m and not current["電話番号"]:
-                current["電話番号"] = m.group(2)
+                current["電話番号"] = m.group(1).strip()  # 原文保持
 
         if c3:
             current["業種_set"].add(extract_industry(c3))
@@ -483,6 +313,9 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # 共通ユーティリティ
 # =========================
+def clean_dataframe(df):
+    return df.fillna("").applymap(lambda x: normalize_text(x) if pd.notnull(x) else "")
+
 def remove_empty_rows(df):
     return df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))]
 
@@ -493,16 +326,14 @@ if uploaded_file:
     filename_no_ext = os.path.splitext(uploaded_file.name)[0]
     xl = pd.ExcelFile(uploaded_file)
 
-    # === 入力マスター優先（B:企業名/C:業種/D:住所/E:電話） ===
+    # === 入力マスター優先（電話は原文保持）===
     if "入力マスター" in xl.sheet_names:
         df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
-        # 表示はまず“原文のまま”
-        disp_phone_series = df_raw.iloc[:, 4].astype(str).map(lambda v: str(v).strip())
         result_df = pd.DataFrame({
-            "企業名": df_raw.iloc[:, 1].astype(str).map(normalize_text),
-            "業種": df_raw.iloc[:, 2].astype(str).map(normalize_text),
-            "住所": df_raw.iloc[:, 3].astype(str).map(clean_address),
-            "電話番号": disp_phone_series
+            "企業名": df_raw.iloc[:, 1].astype(str),
+            "業種": df_raw.iloc[:, 2].astype(str),
+            "住所": df_raw.iloc[:, 3].astype(str),
+            "電話番号": df_raw.iloc[:, 4].astype(str)  # ← normalize_phone をやめて原文保持
         })
     else:
         # --- 抽出（固定プロファイル） ---
@@ -519,26 +350,10 @@ if uploaded_file:
             df0 = pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None).fillna("")
             result_df = extract_warehouse_association(df0)
 
-    # --- 正規化＆比較キー ---
-    result_df = result_df.fillna("")
+    # --- 正規化＆比較キー（会社名正規化・電話digits） ---
+    result_df = clean_dataframe(result_df)
     result_df["__company_canon"] = result_df["企業名"].map(canonical_company_name)
     result_df["__phone_digits"]  = result_df["電話番号"].map(phone_digits_only)
-
-    # === 住所×市外局番“安全”配列補正（抽出後の一括後処理） ===
-    area_fix_logs = []
-    if enable_area_code_fix:
-        new_phones = []
-        for idx, row in result_df.iterrows():
-            new_val, changed, log = reformat_phone_by_address(row["電話番号"], row["住所"])
-            new_phones.append(new_val)
-            if changed:
-                area_fix_logs.append({
-                    "row": idx,
-                    **log
-                })
-        result_df["電話番号"] = new_phones
-        # 比較キーを再生成（配列補正後の数字に基づく）
-        result_df["__phone_digits"] = result_df["電話番号"].map(phone_digits_only)
 
     # --- 業種フィルター（現状維持） ---
     removed_by_industry = 0
@@ -559,7 +374,7 @@ if uploaded_file:
         styled_df = result_df.style.applymap(highlight_logistics, subset=["業種"])
         st.info("🚚 業種が一致したセルを赤くハイライトしています（出力にも反映）")
 
-    # --- NGリスト／重複削除／サマリー ---
+    # --- NGリスト／重複削除／サマリー（現状維持：電話はdigits照合のみ） ---
     removal_logs = []
     company_removed = 0
     phone_removed = 0
@@ -575,7 +390,7 @@ if uploaded_file:
             st.stop()
 
         ng_df["__ng_company_canon"] = ng_df.iloc[:, 0].map(canonical_company_name)
-        ng_df["__ng_phone_digits"]  = ng_df.iloc[:, 1].map(phone_digits_only)
+        ng_df["__ng_phone_digits"]  = ng_df.iloc[:, 1].astype(str).map(phone_digits_only)
 
         ng_company_keys = ng_df["__ng_company_canon"].tolist()
         ng_phone_set    = set([p for p in ng_df["__ng_phone_digits"].tolist() if p])
@@ -610,7 +425,7 @@ if uploaded_file:
                 removal_logs.append({
                     "reason": "ng-phone",
                     "source_company": row["企業名"],
-                    "source_phone": row["電話番号"],
+                    "source_phone": row["電話番号"],  # 原文をログ
                     "match_key": row["__phone_digits"],
                     "ng_hit": row["__phone_digits"]
                 })
@@ -624,14 +439,102 @@ if uploaded_file:
             removal_logs.append({
                 "reason": "phone-duplicate",
                 "source_company": row["企業名"],
-                "source_phone": row["電話番号"],
+                "source_phone": row["電話番号"],  # 原文をログ
                 "match_key": row["__phone_digits"],
                 "ng_hit": ""
             })
         result_df = result_df[~dup_mask]
     removed_by_dedup = before - len(result_df)
 
-    # --- 空行除去・並べ替え（空電話は最後） ---
+    # --- 住所→市区町村→市外局番 監査（原文は上書きしない） ---
+    AREACODE_CSV = "jp_areacodes.csv"      # 列: prefecture,municipality,area_code
+    TOWN2CITY_CSV = "jp_town2city.csv"     # 列: prefecture,municipality,town_keyword
+
+    PREFS = ["北海道","青森県","岩手県","宮城県","秋田県","山形県","福島県","茨城県","栃木県","群馬県","埼玉県","千葉県","東京都","神奈川県","新潟県","富山県","石川県","福井県","山梨県","長野県","岐阜県","静岡県","愛知県","三重県","滋賀県","京都府","大阪府","兵庫県","奈良県","和歌山県","鳥取県","島根県","岡山県","広島県","山口県","徳島県","香川県","愛媛県","高知県","福岡県","佐賀県","長崎県","熊本県","大分県","宮崎県","鹿児島県","沖縄県"]
+
+    def detect_pref(address: str) -> str:
+        s = normalize_text(address)
+        for p in PREFS:
+            if p in s:
+                return p
+        return ""
+
+    def load_town2city(path=TOWN2CITY_CSV):
+        if not os.path.exists(path):
+            return pd.DataFrame(columns=["prefecture","municipality","town_keyword"])
+        return pd.read_csv(path, dtype=str).fillna("")
+
+    T2C = load_town2city()
+
+    def detect_city(pref: str, address: str) -> str:
+        if not pref or T2C.empty:
+            return ""
+        s = normalize_text(address)
+        cand = T2C[T2C["prefecture"] == pref]
+        hits = []
+        for _, r in cand.iterrows():
+            tk = str(r["town_keyword"])
+            if tk and tk in s:
+                hits.append((len(tk), r["municipality"]))
+        if hits:
+            hits.sort(reverse=True)
+            return hits[0][1]
+        for muni in cand["municipality"].unique():
+            if str(muni) in s:
+                return str(muni)
+        return ""
+
+    def load_areacodes(path=AREACODE_CSV):
+        if not os.path.exists(path):
+            return pd.DataFrame(columns=["prefecture","municipality","area_code"])
+        return pd.read_csv(path, dtype=str).fillna("")
+
+    AC = load_areacodes()
+
+    def guess_areacode(pref: str, muni: str) -> str:
+        if AC.empty or not pref:
+            return ""
+        if muni:
+            m = AC[(AC["prefecture"]==pref) & (AC["municipality"]==muni)]
+            if not m.empty:
+                return str(m.iloc[0]["area_code"])
+        m2 = AC[(AC["prefecture"]==pref) & (AC["municipality"].isin(["","-","なし","_","NA"]))]
+        if not m2.empty:
+            return str(m2.iloc[0]["area_code"])
+        return ""
+
+    def starts_with_areacode(digits: str, ac: str) -> bool:
+        return bool(digits and ac and digits.startswith(ac))
+
+    audit_rows = []
+    for idx, row in result_df.iterrows():
+        addr = row.get("住所","")
+        raw  = row.get("電話番号","")
+        digits = phone_digits_only(raw)
+        pref = detect_pref(addr)
+        muni = detect_city(pref, addr)
+        ac   = guess_areacode(pref, muni)
+        ok   = starts_with_areacode(digits, ac) if ac else None
+
+        result_df.loc[idx, "__addr_pref"]  = pref
+        result_df.loc[idx, "__addr_city"]  = muni
+        result_df.loc[idx, "__suggest_ac"] = ac
+        result_df.loc[idx, "__ac_match"]   = ok
+
+        audit_rows.append({
+            "企業名": row.get("企業名",""),
+            "住所": addr,
+            "電話番号(原文保持)": raw,
+            "番号digits": digits,
+            "推定都道府県": pref,
+            "推定市区町村": muni,
+            "推定市外局番": ac,
+            "市外局番一致": "" if ok is None else ("一致" if ok else "不一致")
+        })
+
+    mismatch_cnt = sum(1 for r in audit_rows if r["市外局番一致"]=="不一致")
+
+    # --- 空行除去・並べ替え（空電話は最後／表示は原文） ---
     result_df = remove_empty_rows(result_df)
     result_df["_phdigits"] = result_df["__phone_digits"]
     result_df["_is_empty_phone"] = (result_df["_phdigits"] == "")
@@ -645,36 +548,37 @@ if uploaded_file:
     else:
         st.dataframe(result_df[["企業名","業種","住所","電話番号"]], use_container_width=True)
 
-    # --- サマリー＋削除ログDL ---
-    area_fixed_count = len(area_fix_logs)
+    # --- サマリー＋削除ログDL＋市外局番監査 ---
     with st.expander("📊 実行サマリー（詳細）"):
         st.markdown(f"""
-- 市外局番に基づく“安全”配列補正: **{area_fixed_count}** 件  
 - フィルター除外（製造業 完全一致＋一部部分一致）: **{removed_by_industry}** 件  
 - NG（企業名・部分一致）削除: **{company_removed}** 件  
 - NG（電話・数字一致）削除: **{phone_removed}** 件  
 - 重複（電話・数字一致）削除: **{removed_by_dedup}** 件  
+- 市外局番の不一致（住所推定と番号digitsの先頭が異なる）: **{mismatch_cnt}** 件  
 """)
-        if area_fix_logs:
-            fix_df = pd.DataFrame(area_fix_logs)
-            st.dataframe(fix_df.head(100), use_container_width=True)
-            st.download_button(
-                "🧾 市外局番補正ログをCSVでダウンロード",
-                data=fix_df.to_csv(index=False).encode("utf-8-sig"),
-                file_name="area_fix_logs.csv",
-                mime="text/csv"
-            )
         if removal_logs:
             log_df = pd.DataFrame(removal_logs)
             st.dataframe(log_df.head(100), use_container_width=True)
+            csv_bytes = log_df.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
-                "🧾 NG/重複の削除ログをCSVでダウンロード",
-                data=log_df.to_csv(index=False).encode("utf-8-sig"),
+                "🧾 削除ログをCSVでダウンロード",
+                data=csv_bytes,
                 file_name="removal_logs.csv",
                 mime="text/csv"
             )
+        # 監査CSV
+        audit_df = pd.DataFrame(audit_rows)
+        st.dataframe(audit_df.head(50), use_container_width=True)
+        audit_csv = audit_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "🔎 市外局番 監査CSVをダウンロード",
+            data=audit_csv,
+            file_name="area_code_audit.csv",
+            mime="text/csv"
+        )
 
-    # --- Excel出力（物流ハイライトも反映） ---
+    # --- Excel出力（現状維持：電話は原文のまま／物流ハイライトも反映） ---
     template_file = "template.xlsx"
     if not os.path.exists(template_file):
         st.error("❌ template.xlsx が存在しません")
@@ -702,7 +606,7 @@ if uploaded_file:
         sheet.cell(row=r, column=2, value=row["企業名"])
         sheet.cell(row=r, column=3, value=row["業種"])
         sheet.cell(row=r, column=4, value=row["住所"])
-        sheet.cell(row=r, column=5, value=row["電話番号"])
+        sheet.cell(row=r, column=5, value=row["電話番号"])  # 原文をそのまま出力
         if industry_option == "物流業" and is_logi(row["業種"]):
             sheet.cell(row=r, column=3).fill = red_fill
 
@@ -717,4 +621,4 @@ if uploaded_file:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 else:
-    st.info("template.xlsx、jp_areacodes.csv（推奨）、必要に応じて jp_town2city.csv を同じフォルダに置いてから、Excelファイルをアップロードしてください。")
+    st.info("template.xlsx / jp_areacodes.csv / jp_town2city.csv と（必要なら）NGリストxlsxを同じフォルダに置いてから、Excelファイルをアップロードしてください。")

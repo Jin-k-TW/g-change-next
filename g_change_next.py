@@ -11,7 +11,7 @@ from openpyxl.styles import PatternFill
 # Streamlit設定
 # ===============================
 st.set_page_config(page_title="G-Change Next", layout="wide")
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver5.3 原文電話保持＋誤検出防止＋NG照合）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.0 原文電話保持＋NG照合＋template書き込み）")
 
 # ===============================
 # テキスト正規化
@@ -50,8 +50,7 @@ def canonical_company_name(name: str) -> str:
 HYPHENS = "-‒–—―−－ー‐﹣\u2011"
 HYPHENS_CLASS = re.escape(HYPHENS)
 
-# 電話番号候補抽出（誤検出防止）
-# 8文字以上の数字＋ハイフン/空白の塊を候補化
+# 電話番号候補抽出（誤検出防止）: 数字＋ハイフン/空白が続く8文字以上の塊
 CANDIDATE_RE = re.compile(rf"[+]?\d(?:[\d{HYPHENS_CLASS}\s]{{6,}})\d")
 
 def pick_phone_token_raw(line: str) -> str:
@@ -79,12 +78,13 @@ def pick_phone_token_raw(line: str) -> str:
     return cands[0][1]
 
 def phone_digits_only(s: str) -> str:
-    """内部照合用に数字だけ抽出"""
+    """内部照合用に数字だけ抽出（原文表記は保持）"""
     return re.sub(r"\D", "", str(s or ""))
 
 # ===============================
-# Google検索リスト形式（縦読み・電話上下）
+# 抽出プロファイル（3方式）
 # ===============================
+# 1) Google検索リスト（縦読み・電話上下）
 def extract_google_vertical(lines):
     results = []
     rows = [str(l) for l in lines if str(l).strip() != ""]
@@ -98,9 +98,7 @@ def extract_google_vertical(lines):
             results.append([company, industry, clean_address(address), phone])
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
-# ===============================
-# シゴトアルワ形式（縦積み）
-# ===============================
+# 2) シゴトアルワ（縦積み）
 def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
     df = df_like.copy()
     if df.columns.size > 2:
@@ -131,9 +129,7 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
         flush()
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
-# ===============================
-# 日本倉庫協会形式（4列）
-# ===============================
+# 3) 日本倉庫協会（4列）
 def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
     df = df_like.fillna("")
     if df.shape[1] < 2:
@@ -169,6 +165,25 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
 # ===============================
+# 業種のフィルター/ハイライト
+# ===============================
+remove_exact = [
+    "オフィス機器レンタル業", "足場レンタル会社", "電気工", "廃棄物リサイクル業",
+    "プロパン販売業者", "看板専門店", "給水設備工場", "警備業", "建設会社",
+    "工務店", "写真店", "人材派遣業", "整備店", "倉庫", "肉店", "米販売店",
+    "スーパーマーケット", "ロジスティクスサービス", "建材店",
+    "自動車整備工場", "自動車販売店", "車体整備店", "協会/組織", "建設請負業者", "電器店", "家電量販店", "建築会社", "ハウス クリーニング業", "焼肉店",
+    "建築設計事務所","左官","作業服店","空調設備工事業者","金属スクラップ業者","害獣駆除サービス","モーター修理店","アーチェリーショップ","アスベスト検査業","事務用品店",
+    "測量士","配管業者","労働組合","ガス会社","ガソリンスタンド","ガラス/ミラー店","ワイナリー","屋根ふき業者","高等学校","金物店","史跡","商工会議所","清掃業","清掃業者","配管工"
+]
+remove_partial = ["販売店", "販売業者"]
+
+highlight_partial = [
+    "運輸", "ロジスティクスサービス", "倉庫", "輸送サービス",
+    "運送会社企業のオフィス", "運送会社"
+]
+
+# ===============================
 # 共通整形（電話は触らない）
 # ===============================
 def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
@@ -178,28 +193,31 @@ def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     return df.fillna("")
 
 # ===============================
-# UI：NGリスト選択を復活
+# UI（NGリスト選択・抽出方式・業種カテゴリ）
 # ===============================
 st.markdown("### 🛡️ 使用するNGリストを選択")
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
 nglist_options = ["なし"] + [os.path.splitext(f)[0] for f in nglist_files]
 selected_nglist = st.selectbox("NGリスト", nglist_options, index=0, help="同じフォルダにある『NGリスト〜.xlsx』を検出します。1列目=企業名、2列目=電話番号（任意）。")
 
-# ===============================
-# 入力UI
-# ===============================
-st.markdown("### 📤 整形対象のExcelファイルをアップロード")
+st.markdown("### 🧭 抽出方法を選択")
 profile = st.selectbox(
     "抽出プロファイル",
     ["Google検索リスト（縦読み・電話上下型）", "シゴトアルワ検索リスト（縦積み）", "日本倉庫協会リスト（4列型）"]
 )
-uploaded_file = st.file_uploader("Excelファイルを選択", type=["xlsx"])
+
+st.markdown("### 🏭 業種カテゴリを選択")
+industry_option = st.radio("どの業種カテゴリーに該当しますか？", ("製造業", "物流業", "その他"))
+
+uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアップロード", type=["xlsx"])
 
 # ===============================
 # メイン処理
 # ===============================
 if uploaded_file:
+    filename_no_ext = os.path.splitext(uploaded_file.name)[0]
     xl = pd.ExcelFile(uploaded_file)
+
     # --- 抽出 ---
     if profile == "Google検索リスト（縦読み・電話上下型）":
         df0 = pd.read_excel(uploaded_file, header=None).fillna("")
@@ -219,7 +237,18 @@ if uploaded_file:
     df["__company_canon"] = df["企業名"].map(canonical_company_name)
     df["__digits"] = df["電話番号"].map(phone_digits_only)
 
-    # --- NG照合（任意）＆ 重複削除 ---
+    # --- 業種フィルター（製造業のみ除外ルール適用） ---
+    removed_by_industry = 0
+    if industry_option == "製造業":
+        before = len(df)
+        df = df[~df["業種"].isin(remove_exact)]
+        if remove_partial:
+            pat = "|".join(map(re.escape, remove_partial))
+            df = df[~df["業種"].str.contains(pat, na=False)]
+        removed_by_industry = before - len(df)
+        st.warning(f"🏭 製造業フィルター適用：{removed_by_industry}件を除外しました")
+
+    # --- NG照合（任意） ---
     removal_logs = []
     company_removed = 0
     phone_removed = 0
@@ -277,7 +306,7 @@ if uploaded_file:
             df = df[~mask]
         phone_removed = before - len(df)
 
-    # 重複（電話digits）除去
+    # --- 重複（電話digits）除去 ---
     before = len(df)
     dup_mask = df["__digits"].ne("").astype(bool) & df["__digits"].duplicated(keep="first")
     if dup_mask.any():
@@ -291,7 +320,10 @@ if uploaded_file:
         df = df[~dup_mask]
     dup_removed = before - len(df)
 
-    # --- 表示（編集可） ---
+    # --- 空行の除去 ---
+    df = df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))].reset_index(drop=True)
+
+    # --- 画面表示（編集可） ---
     st.success(f"✅ 整形完了：{len(df)}件の企業データを取得しました。")
     edited = st.data_editor(
         df[["企業名", "業種", "住所", "電話番号"]],
@@ -322,23 +354,64 @@ if uploaded_file:
     # --- サマリー＆削除ログDL ---
     with st.expander("📊 実行サマリー（詳細）"):
         st.markdown(
+            f"- フィルター除外（製造業 完全一致＋一部部分一致）: **{removed_by_industry}** 件\n"
             f"- NG（企業名 部分一致）削除: **{company_removed}** 件\n"
             f"- NG（電話 digits一致）削除: **{phone_removed}** 件\n"
             f"- 重複（電話 digits一致）削除: **{dup_removed}** 件\n"
         )
         if removal_logs:
             log_df = pd.DataFrame(removal_logs)
-            st.dataframe(log_df.head(200), use_container_width=True)
+            st.dataframe(log_df.head(300), use_container_width=True)
             csv_bytes = log_df.to_csv(index=False).encode("utf-8-sig")
             st.download_button("🧾 削除ログをCSVでダウンロード", data=csv_bytes, file_name="removal_logs.csv", mime="text/csv")
 
-    # --- Excel出力（簡易：単一シート） ---
-    out = io.BytesIO()
-    df_out = df.drop(columns=["__company_canon", "__digits"], errors="ignore")
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df_out.to_excel(writer, index=False, sheet_name="出力")
-    out.seek(0)
-    st.download_button("📥 整形済みリストをダウンロード", data=out, file_name="整形済みリスト.xlsx")
+    # ===============================
+    # template.xlsx へ書き込み
+    # ===============================
+    template_file = "template.xlsx"
+    if not os.path.exists(template_file):
+        st.error("❌ template.xlsx が存在しません。同じフォルダに置いてください。")
+        st.stop()
+
+    workbook = load_workbook(template_file)
+    if "入力マスター" not in workbook.sheetnames:
+        st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
+        st.stop()
+
+    sheet = workbook["入力マスター"]
+
+    # 既存データ（2行目以降のB〜E）と塗りをクリア
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+        for cell in row[1:5]:  # B(1)〜E(4)
+            cell.value = None
+            cell.fill = PatternFill(fill_type=None)
+
+    # 物流ハイライト（業種に特定語が含まれる場合、C列を赤く）
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    def is_logi(val: str) -> bool:
+        v = (val or "").strip()
+        return any(word in v for word in highlight_partial)
+
+    # データ書き込み（B=企業名, C=業種, D=住所, E=電話）
+    for idx, row in df.iterrows():
+        r = idx + 2
+        sheet.cell(row=r, column=2, value=row["企業名"])
+        sheet.cell(row=r, column=3, value=row["業種"])
+        sheet.cell(row=r, column=4, value=row["住所"])
+        sheet.cell(row=r, column=5, value=row["電話番号"])
+        if industry_option == "物流業" and is_logi(row["業種"]):
+            sheet.cell(row=r, column=3).fill = red_fill
+
+    # ダウンロード
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    st.download_button(
+        label="📥 整形済みリストをダウンロード（template.xlsx 反映）",
+        data=output,
+        file_name=f"{filename_no_ext}リスト.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 else:
-    st.info("Excelファイルをアップロードしてください。NGリストxlsxを同じフォルダに置くと選択できます。")
+    st.info("template.xlsx と（必要なら）NGリストxlsxを同じフォルダに置いてから、Excelファイルをアップロードしてください。")

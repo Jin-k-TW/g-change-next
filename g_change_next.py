@@ -11,7 +11,7 @@ from openpyxl.styles import PatternFill
 # Streamlit設定
 # ===============================
 st.set_page_config(page_title="G-Change Next", layout="wide")
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.0 原文電話保持＋NG照合＋template書き込み）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.1 原文電話保持＋NG照合＋template書き込み＋入力マスター優先）")
 
 # ===============================
 # テキスト正規化
@@ -219,16 +219,28 @@ if uploaded_file:
     xl = pd.ExcelFile(uploaded_file)
 
     # --- 抽出 ---
-    if profile == "Google検索リスト（縦読み・電話上下型）":
-        df0 = pd.read_excel(uploaded_file, header=None).fillna("")
-        lines = df0.iloc[:, 0].tolist()
-        df = extract_google_vertical(lines)
-    elif profile == "シゴトアルワ検索リスト（縦積み）":
-        df0 = pd.read_excel(xl, header=None).fillna("")
-        df = extract_shigoto_arua(df0)
+    # ① template互換: 「入力マスター」シートがあれば最優先で読み取り（電話は原文のまま）
+    if "入力マスター" in xl.sheet_names:
+        df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
+        # 行1がヘッダ、行2以降がデータ（B:企業名, C:業種, D:住所, E:電話）
+        df = pd.DataFrame({
+            "企業名": df_raw.iloc[1:, 1].astype(str),
+            "業種": df_raw.iloc[1:, 2].astype(str),
+            "住所": df_raw.iloc[1:, 3].astype(str),
+            "電話番号": df_raw.iloc[1:, 4].astype(str),   # ←電話は原文保持
+        })
     else:
-        df0 = pd.read_excel(xl, header=None).fillna("")
-        df = extract_warehouse_association(df0)
+        # ② それ以外は従来の3プロファイル
+        if profile == "Google検索リスト（縦読み・電話上下型）":
+            df0 = pd.read_excel(uploaded_file, header=None).fillna("")
+            lines = df0.iloc[:, 0].tolist()
+            df = extract_google_vertical(lines)
+        elif profile == "シゴトアルワ検索リスト（縦積み）":
+            df0 = pd.read_excel(xl, header=None).fillna("")
+            df = extract_shigoto_arua(df0)
+        else:
+            df0 = pd.read_excel(xl, header=None).fillna("")
+            df = extract_warehouse_association(df0)
 
     # --- 非電話列のみ正規化 ---
     df = clean_dataframe_except_phone(df)

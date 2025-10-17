@@ -4,6 +4,7 @@ import re
 import unicodedata
 import io
 import os
+from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
@@ -11,7 +12,7 @@ from openpyxl.styles import PatternFill
 # Streamlit設定
 # ===============================
 st.set_page_config(page_title="G-Change Next", layout="wide")
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.1 原文電話保持＋NG照合＋template書き込み＋入力マスター優先）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.2 原文電話保持＋NG照合＋template書き込み＋入力マスター優先＋OS互換強化）")
 
 # ===============================
 # テキスト正規化
@@ -193,7 +194,7 @@ def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     return df.fillna("")
 
 # ===============================
-# UI（NGリスト選択・抽出方式・業種カテゴリ）
+# UI（NGリスト選択・抽出方式・業種カテゴリ・テンプレート入力）
 # ===============================
 st.markdown("### 🛡️ 使用するNGリストを選択")
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
@@ -209,6 +210,16 @@ profile = st.selectbox(
 st.markdown("### 🏭 業種カテゴリを選択")
 industry_option = st.radio("どの業種カテゴリーに該当しますか？", ("製造業", "物流業", "その他"))
 
+st.markdown("### 🧩 テンプレートの取得方法（OS互換強化）")
+template_source = st.radio(
+    "template.xlsx の取得元",
+    ("プロジェクト内の template.xlsx を使う（従来）", "ここで template.xlsx をアップロードして使う"),
+    index=0
+)
+template_upload = None
+if template_source == "ここで template.xlsx をアップロードして使う":
+    template_upload = st.file_uploader("template.xlsx をアップロード", type=["xlsx"], key="template_up")
+
 uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアップロード", type=["xlsx"])
 
 # ===============================
@@ -216,12 +227,13 @@ uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアッ
 # ===============================
 if uploaded_file:
     filename_no_ext = os.path.splitext(uploaded_file.name)[0]
-    xl = pd.ExcelFile(uploaded_file)
+    # xlsx は常に openpyxl で読む（OS差異対策）
+    xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
     # --- 抽出 ---
     # ① template互換: 「入力マスター」シートがあれば最優先で読み取り（電話は原文のまま）
     if "入力マスター" in xl.sheet_names:
-        df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None).fillna("")
+        df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None, engine="openpyxl").fillna("")
         # 行1がヘッダ、行2以降がデータ（B:企業名, C:業種, D:住所, E:電話）
         df = pd.DataFrame({
             "企業名": df_raw.iloc[1:, 1].astype(str),
@@ -232,14 +244,14 @@ if uploaded_file:
     else:
         # ② それ以外は従来の3プロファイル
         if profile == "Google検索リスト（縦読み・電話上下型）":
-            df0 = pd.read_excel(uploaded_file, header=None).fillna("")
+            df0 = pd.read_excel(uploaded_file, header=None, engine="openpyxl").fillna("")
             lines = df0.iloc[:, 0].tolist()
             df = extract_google_vertical(lines)
         elif profile == "シゴトアルワ検索リスト（縦積み）":
-            df0 = pd.read_excel(xl, header=None).fillna("")
+            df0 = pd.read_excel(xl, header=None, engine="openpyxl").fillna("")
             df = extract_shigoto_arua(df0)
         else:
-            df0 = pd.read_excel(xl, header=None).fillna("")
+            df0 = pd.read_excel(xl, header=None, engine="openpyxl").fillna("")
             df = extract_warehouse_association(df0)
 
     # --- 非電話列のみ正規化 ---
@@ -271,7 +283,7 @@ if uploaded_file:
         if not os.path.exists(ng_path):
             st.error(f"❌ 選択されたNGリストが見つかりません：{ng_path}")
             st.stop()
-        ng_df = pd.read_excel(ng_path).fillna("")
+        ng_df = pd.read_excel(ng_path, engine="openpyxl").fillna("")
         if ng_df.shape[1] < 1:
             st.error("❌ NGリストは少なくとも1列（企業名）が必要です。2列目に電話番号があれば照合に利用します。")
             st.stop()
@@ -378,19 +390,38 @@ if uploaded_file:
             st.download_button("🧾 削除ログをCSVでダウンロード", data=csv_bytes, file_name="removal_logs.csv", mime="text/csv")
 
     # ===============================
-    # template.xlsx へ書き込み
+    # template.xlsx へ書き込み（OS互換強化）
     # ===============================
-    template_file = "template.xlsx"
-    if not os.path.exists(template_file):
-        st.error("❌ template.xlsx が存在しません。同じフォルダに置いてください。")
-        st.stop()
+    # 1) アップロードされた template.xlsx を優先
+    wb = None
+    if template_upload is not None:
+        try:
+            # openpyxl はバイトIOからもロード可
+            buf = io.BytesIO(template_upload.read())
+            wb = load_workbook(buf)
+        except Exception as e:
+            st.error(f"❌ アップロードした template.xlsx の読み込みに失敗しました: {e}")
+            st.stop()
+    else:
+        # 2) スクリプト相対パスで解決（作業ディレクトリ差を吸収）
+        app_dir = Path(__file__).resolve().parent
+        template_path = app_dir / "template.xlsx"
+        if not template_path.exists():
+            st.error(f"❌ template.xlsx が見つかりませんでした（期待パス: {template_path}）。"
+                     "『ここで template.xlsx をアップロードして使う』を選ぶか、"
+                     "ファイルをプロジェクト直下に配置してください。")
+            st.stop()
+        try:
+            wb = load_workbook(template_path)
+        except Exception as e:
+            st.error(f"❌ template.xlsx の読み込みに失敗しました: {e}")
+            st.stop()
 
-    workbook = load_workbook(template_file)
-    if "入力マスター" not in workbook.sheetnames:
+    if "入力マスター" not in wb.sheetnames:
         st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
         st.stop()
 
-    sheet = workbook["入力マスター"]
+    sheet = wb["入力マスター"]
 
     # 既存データ（2行目以降のB〜E）と塗りをクリア
     for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
@@ -416,7 +447,7 @@ if uploaded_file:
 
     # ダウンロード
     output = io.BytesIO()
-    workbook.save(output)
+    wb.save(output)
     output.seek(0)
     st.download_button(
         label="📥 整形済みリストをダウンロード（template.xlsx 反映）",
@@ -426,4 +457,4 @@ if uploaded_file:
     )
 
 else:
-    st.info("template.xlsx と（必要なら）NGリストxlsxを同じフォルダに置いてから、Excelファイルをアップロードしてください。")
+    st.info("Excelファイルをアップロードしてください。NGリストxlsxは同フォルダに置くか、プロジェクト直下に配置してください。")

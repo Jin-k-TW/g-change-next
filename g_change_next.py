@@ -55,8 +55,7 @@ HYPHENS_CLASS = re.escape(HYPHENS)
 CANDIDATE_RE = re.compile(rf"[+]?\d(?:[\d{HYPHENS_CLASS}\s]{{6,}})\d")
 
 def pick_phone_token_raw(line: str) -> str:
-    """1行から電話番号らしい文字列を抽出。
-       digits 長が 9〜11 以外は不採用。原文表記（ハイフン位置）をそのまま返す。"""
+    """1行から電話番号らしい文字列を抽出。digits 長が 9〜11 以外は不採用。原文表記（ハイフン位置）をそのまま返す。"""
     if not line:
         return ""
     s = unicodedata.normalize("NFKC", str(line))
@@ -185,12 +184,38 @@ highlight_partial = [
 ]
 
 # ===============================
+# 業種ノイズ除去（★追加ロジック）
+# ===============================
+def clean_industry_noise(s: str) -> str:
+    """業種カラムに紛れ込む『レビュー/評価/件数』などのノイズを除去。
+    例: '4.3(42)・食品製造業者' -> '食品製造業者'
+        'レビューなし・産業用機器製造業者' -> '産業用機器製造業者'
+        'レビュー ・ 電子部品製造業者' -> '電子部品製造業者'
+    """
+    if not s:
+        return s
+    t = str(s)
+
+    # 先頭の評価スコア + 件数 例: '4.7(123)・', '4.7（123）・'
+    t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*・?\s*", "", t)
+
+    # 先頭/中間の「レビュー」「レビューなし」「Google のクチコミ」など
+    t = re.sub(r"(?:^|・)\s*レビュー(?:なし)?\s*(?=・|$)", "", t)
+    t = re.sub(r"(?:^|・)\s*(?:Google\s*の\s*クチコミ|口コミ|クチコミ)\s*(?=・|$)", "", t)
+
+    # 区切りの整形
+    t = re.sub(r"・{2,}", "・", t).strip("・ ").strip()
+    return t
+
+# ===============================
 # 共通整形（電話は触らない）
 # ===============================
 def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for c in ["企業名", "業種", "住所"]:
         df[c] = df[c].map(normalize_text)
+    # ★業種ノイズ（レビュー/評価）だけを除去。他列は触らない
+    df["業種"] = df["業種"].map(clean_industry_noise)
     return df.fillna("")
 
 # ===============================
@@ -396,7 +421,6 @@ if uploaded_file:
     wb = None
     if template_upload is not None:
         try:
-            # openpyxl はバイトIOからもロード可
             buf = io.BytesIO(template_upload.read())
             wb = load_workbook(buf)
         except Exception as e:

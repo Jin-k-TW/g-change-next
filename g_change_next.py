@@ -184,14 +184,10 @@ highlight_partial = [
 ]
 
 # ===============================
-# 業種ノイズ除去（★追加ロジック）
+# 業種ノイズ除去（レビュー等）
 # ===============================
 def clean_industry_noise(s: str) -> str:
-    """業種カラムに紛れ込む『レビュー/評価/件数』などのノイズを除去。
-    例: '4.3(42)・食品製造業者' -> '食品製造業者'
-        'レビューなし・産業用機器製造業者' -> '産業用機器製造業者'
-        'レビュー ・ 電子部品製造業者' -> '電子部品製造業者'
-    """
+    """業種カラムに紛れ込む『レビュー/評価/件数』などのノイズを除去。"""
     if not s:
         return s
     t = str(s)
@@ -214,7 +210,6 @@ def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for c in ["企業名", "業種", "住所"]:
         df[c] = df[c].map(normalize_text)
-    # ★業種ノイズ（レビュー/評価）だけを除去。他列は触らない
     df["業種"] = df["業種"].map(clean_industry_noise)
     return df.fillna("")
 
@@ -245,240 +240,259 @@ template_upload = None
 if template_source == "ここで template.xlsx をアップロードして使う":
     template_upload = st.file_uploader("template.xlsx をアップロード", type=["xlsx"], key="template_up")
 
-uploaded_file = st.file_uploader("📤 整形対象のExcelファイルをアップロード", type=["xlsx"])
+# ★ここだけ変更：複数ファイル受け取り
+uploaded_files = st.file_uploader(
+    "📤 整形対象のExcelファイルをアップロード（複数可）",
+    type=["xlsx"],
+    accept_multiple_files=True
+)
+
+# アップロードされた template.xlsx は bytes にして複数回使えるようにする
+template_bytes = None
+if template_upload is not None:
+    template_bytes = template_upload.getvalue()
 
 # ===============================
-# メイン処理
+# メイン処理（複数ファイルを順に処理）
 # ===============================
-if uploaded_file:
-    filename_no_ext = os.path.splitext(uploaded_file.name)[0]
-    # xlsx は常に openpyxl で読む（OS差異対策）
-    xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        st.markdown("---")
+        st.subheader(f"📂 処理ファイル：{uploaded_file.name}")
 
-    # --- 抽出 ---
-    # ① template互換: 「入力マスター」シートがあれば最優先で読み取り（電話は原文のまま）
-    if "入力マスター" in xl.sheet_names:
-        df_raw = pd.read_excel(xl, sheet_name="入力マスター", header=None, engine="openpyxl").fillna("")
-        # 行1がヘッダ、行2以降がデータ（B:企業名, C:業種, D:住所, E:電話）
-        df = pd.DataFrame({
-            "企業名": df_raw.iloc[1:, 1].astype(str),
-            "業種": df_raw.iloc[1:, 2].astype(str),
-            "住所": df_raw.iloc[1:, 3].astype(str),
-            "電話番号": df_raw.iloc[1:, 4].astype(str),   # ←電話は原文保持
-        })
-    else:
-        # ② それ以外は従来の3プロファイル
-        if profile == "Google検索リスト（縦読み・電話上下型）":
-            df0 = pd.read_excel(uploaded_file, header=None, engine="openpyxl").fillna("")
-            lines = df0.iloc[:, 0].tolist()
-            df = extract_google_vertical(lines)
-        elif profile == "シゴトアルワ検索リスト（縦積み）":
-            df0 = pd.read_excel(xl, header=None, engine="openpyxl").fillna("")
-            df = extract_shigoto_arua(df0)
+        filename_no_ext = os.path.splitext(uploaded_file.name)[0]
+        xl = pd.ExcelFile(uploaded_file, engine="openpyxl")
+
+        # --- 抽出 ---
+        if "入力マスター" in xl.sheet_names:
+            df_raw = pd.read_excel(
+                xl, sheet_name="入力マスター", header=None, engine="openpyxl"
+            ).fillna("")
+            df = pd.DataFrame({
+                "企業名": df_raw.iloc[1:, 1].astype(str),
+                "業種": df_raw.iloc[1:, 2].astype(str),
+                "住所": df_raw.iloc[1:, 3].astype(str),
+                "電話番号": df_raw.iloc[1:, 4].astype(str),
+            })
         else:
-            df0 = pd.read_excel(xl, header=None, engine="openpyxl").fillna("")
-            df = extract_warehouse_association(df0)
+            if profile == "Google検索リスト（縦読み・電話上下型）":
+                df0 = pd.read_excel(uploaded_file, header=None, engine="openpyxl").fillna("")
+                lines = df0.iloc[:, 0].tolist()
+                df = extract_google_vertical(lines)
+            elif profile == "シゴトアルワ検索リスト（縦積み）":
+                df0 = pd.read_excel(xl, header=None, engine="openpyxl").fillna("")
+                df = extract_shigoto_arua(df0)
+            else:
+                df0 = pd.read_excel(xl, header=None, engine="openpyxl").fillna("")
+                df = extract_warehouse_association(df0)
 
-    # --- 非電話列のみ正規化 ---
-    df = clean_dataframe_except_phone(df)
+        # --- 非電話列のみ正規化 ---
+        df = clean_dataframe_except_phone(df)
 
-    # --- 比較キー ---
-    df["__company_canon"] = df["企業名"].map(canonical_company_name)
-    df["__digits"] = df["電話番号"].map(phone_digits_only)
+        # --- 比較キー ---
+        df["__company_canon"] = df["企業名"].map(canonical_company_name)
+        df["__digits"] = df["電話番号"].map(phone_digits_only)
 
-    # --- 業種フィルター（製造業のみ除外ルール適用） ---
-    removed_by_industry = 0
-    if industry_option == "製造業":
+        # --- 業種フィルター（製造業のみ除外ルール適用） ---
+        removed_by_industry = 0
+        if industry_option == "製造業":
+            before = len(df)
+            df = df[~df["業種"].isin(remove_exact)]
+            if remove_partial:
+                pat = "|".join(map(re.escape, remove_partial))
+                df = df[~df["業種"].str.contains(pat, na=False)]
+            removed_by_industry = before - len(df)
+            st.warning(f"🏭 製造業フィルター適用：{removed_by_industry}件を除外しました")
+
+        # --- NG照合（任意） ---
+        removal_logs = []
+        company_removed = 0
+        phone_removed = 0
+        dup_removed = 0
+
+        if selected_nglist != "なし":
+            ng_path = f"{selected_nglist}.xlsx"
+            if not os.path.exists(ng_path):
+                st.error(f"❌ 選択されたNGリストが見つかりません：{ng_path}")
+                st.stop()
+            ng_df = pd.read_excel(ng_path, engine="openpyxl").fillna("")
+            if ng_df.shape[1] < 1:
+                st.error("❌ NGリストは少なくとも1列（企業名）が必要です。2列目に電話番号があれば照合に利用します。")
+                st.stop()
+
+            ng_df["__ng_company_canon"] = ng_df.iloc[:, 0].map(canonical_company_name)
+            if ng_df.shape[1] >= 2:
+                ng_df["__ng_digits"] = ng_df.iloc[:, 1].astype(str).map(phone_digits_only)
+            else:
+                ng_df["__ng_digits"] = ""
+
+            ng_names = [n for n in ng_df["__ng_company_canon"].tolist() if n]
+            ng_phones = set([d for d in ng_df["__ng_digits"].tolist() if d])
+
+            # 企業名（部分一致・相互包含）
+            before = len(df)
+            hit_idx = []
+            for idx, row in df.iterrows():
+                c = row["__company_canon"]
+                if not c:
+                    continue
+                if any((n in c or c in n) for n in ng_names):
+                    removal_logs.append({
+                        "reason": "ng-company",
+                        "company": row["企業名"],
+                        "phone_raw": row["電話番号"],
+                        "match": c
+                    })
+                    hit_idx.append(idx)
+            if hit_idx:
+                df = df.drop(index=hit_idx)
+            company_removed = before - len(df)
+
+            # 電話番号digits一致
+            before = len(df)
+            mask = df["__digits"].isin(ng_phones)
+            if mask.any():
+                for idx, row in df[mask].iterrows():
+                    removal_logs.append({
+                        "reason": "ng-phone",
+                        "company": row["企業名"],
+                        "phone_raw": row["電話番号"],
+                        "match": row["__digits"]
+                    })
+                df = df[~mask]
+            phone_removed = before - len(df)
+
+        # --- 重複（電話digits）除去 ---
         before = len(df)
-        df = df[~df["業種"].isin(remove_exact)]
-        if remove_partial:
-            pat = "|".join(map(re.escape, remove_partial))
-            df = df[~df["業種"].str.contains(pat, na=False)]
-        removed_by_industry = before - len(df)
-        st.warning(f"🏭 製造業フィルター適用：{removed_by_industry}件を除外しました")
-
-    # --- NG照合（任意） ---
-    removal_logs = []
-    company_removed = 0
-    phone_removed = 0
-    dup_removed = 0
-
-    if selected_nglist != "なし":
-        ng_path = f"{selected_nglist}.xlsx"
-        if not os.path.exists(ng_path):
-            st.error(f"❌ 選択されたNGリストが見つかりません：{ng_path}")
-            st.stop()
-        ng_df = pd.read_excel(ng_path, engine="openpyxl").fillna("")
-        if ng_df.shape[1] < 1:
-            st.error("❌ NGリストは少なくとも1列（企業名）が必要です。2列目に電話番号があれば照合に利用します。")
-            st.stop()
-
-        ng_df["__ng_company_canon"] = ng_df.iloc[:, 0].map(canonical_company_name)
-        if ng_df.shape[1] >= 2:
-            ng_df["__ng_digits"] = ng_df.iloc[:, 1].astype(str).map(phone_digits_only)
-        else:
-            ng_df["__ng_digits"] = ""
-
-        ng_names = [n for n in ng_df["__ng_company_canon"].tolist() if n]
-        ng_phones = set([d for d in ng_df["__ng_digits"].tolist() if d])
-
-        # 企業名（部分一致・相互包含）
-        before = len(df)
-        hit_idx = []
-        for idx, row in df.iterrows():
-            c = row["__company_canon"]
-            if not c:
-                continue
-            if any((n in c or c in n) for n in ng_names):
+        dup_mask = df["__digits"].ne("").astype(bool) & df["__digits"].duplicated(keep="first")
+        if dup_mask.any():
+            for idx, row in df[dup_mask].iterrows():
                 removal_logs.append({
-                    "reason": "ng-company",
-                    "company": row["企業名"],
-                    "phone_raw": row["電話番号"],
-                    "match": c
-                })
-                hit_idx.append(idx)
-        if hit_idx:
-            df = df.drop(index=hit_idx)
-        company_removed = before - len(df)
-
-        # 電話番号digits一致
-        before = len(df)
-        mask = df["__digits"].isin(ng_phones)
-        if mask.any():
-            for idx, row in df[mask].iterrows():
-                removal_logs.append({
-                    "reason": "ng-phone",
+                    "reason": "dup-phone",
                     "company": row["企業名"],
                     "phone_raw": row["電話番号"],
                     "match": row["__digits"]
                 })
-            df = df[~mask]
-        phone_removed = before - len(df)
+            df = df[~dup_mask]
+        dup_removed = before - len(df)
 
-    # --- 重複（電話digits）除去 ---
-    before = len(df)
-    dup_mask = df["__digits"].ne("").astype(bool) & df["__digits"].duplicated(keep="first")
-    if dup_mask.any():
-        for idx, row in df[dup_mask].iterrows():
-            removal_logs.append({
-                "reason": "dup-phone",
-                "company": row["企業名"],
-                "phone_raw": row["電話番号"],
-                "match": row["__digits"]
-            })
-        df = df[~dup_mask]
-    dup_removed = before - len(df)
+        # --- 空行の除去 ---
+        df = df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))].reset_index(drop=True)
 
-    # --- 空行の除去 ---
-    df = df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))].reset_index(drop=True)
+        # --- 画面表示（編集可） ---
+        st.success(f"✅ 整形完了：{len(df)}件の企業データを取得しました。")
 
-    # --- 画面表示（編集可） ---
-    st.success(f"✅ 整形完了：{len(df)}件の企業データを取得しました。")
-    edited = st.data_editor(
-        df[["企業名", "業種", "住所", "電話番号"]],
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            "企業名": st.column_config.TextColumn(required=True),
-            "業種": st.column_config.TextColumn(),
-            "住所": st.column_config.TextColumn(),
-            "電話番号": st.column_config.TextColumn(
-                help="原文の配列を保持。必要ならここで手動修正し『この内容で確定』を押してください。"
-            ),
-        },
-        key="editable_preview",
-    )
-
-    if st.button("✅ この内容で確定（反映）"):
-        df["企業名"], df["業種"], df["住所"], df["電話番号"] = (
-            edited["企業名"],
-            edited["業種"],
-            edited["住所"],
-            edited["電話番号"],
+        editor_key = f"editable_preview_{filename_no_ext}"
+        edited = st.data_editor(
+            df[["企業名", "業種", "住所", "電話番号"]],
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={
+                "企業名": st.column_config.TextColumn(required=True),
+                "業種": st.column_config.TextColumn(),
+                "住所": st.column_config.TextColumn(),
+                "電話番号": st.column_config.TextColumn(
+                    help="原文の配列を保持。必要ならここで手動修正し『この内容で確定』を押してください。"
+                ),
+            },
+            key=editor_key,
         )
-        # 再計算（重複等の後続操作に備えてdigitsを更新）
-        df["__digits"] = df["電話番号"].map(phone_digits_only)
-        st.success("編集内容を反映しました。出力はこの表記のままです。")
 
-    # --- サマリー＆削除ログDL ---
-    with st.expander("📊 実行サマリー（詳細）"):
-        st.markdown(
-            f"- フィルター除外（製造業 完全一致＋一部部分一致）: **{removed_by_industry}** 件\n"
-            f"- NG（企業名 部分一致）削除: **{company_removed}** 件\n"
-            f"- NG（電話 digits一致）削除: **{phone_removed}** 件\n"
-            f"- 重複（電話 digits一致）削除: **{dup_removed}** 件\n"
+        button_key = f"confirm_{filename_no_ext}"
+        if st.button("✅ この内容で確定（反映）", key=button_key):
+            df["企業名"], df["業種"], df["住所"], df["電話番号"] = (
+                edited["企業名"],
+                edited["業種"],
+                edited["住所"],
+                edited["電話番号"],
+            )
+            df["__digits"] = df["電話番号"].map(phone_digits_only)
+            st.success("編集内容を反映しました。出力はこの表記のままです。")
+
+        # --- サマリー＆削除ログDL ---
+        with st.expander(f"📊 実行サマリー（詳細） - {uploaded_file.name}"):
+            st.markdown(
+                f"- フィルター除外（製造業 完全一致＋一部部分一致）: **{removed_by_industry}** 件\n"
+                f"- NG（企業名 部分一致）削除: **{company_removed}** 件\n"
+                f"- NG（電話 digits一致）削除: **{phone_removed}** 件\n"
+                f"- 重複（電話 digits一致）削除: **{dup_removed}** 件\n"
+            )
+            if removal_logs:
+                log_df = pd.DataFrame(removal_logs)
+                st.dataframe(log_df.head(300), use_container_width=True)
+                csv_bytes = log_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "🧾 削除ログをCSVでダウンロード",
+                    data=csv_bytes,
+                    file_name=f"removal_logs_{filename_no_ext}.csv",
+                    mime="text/csv",
+                )
+
+        # ===============================
+        # template.xlsx へ書き込み（OS互換強化）
+        # ===============================
+        wb = None
+        if template_bytes is not None:
+            try:
+                buf = io.BytesIO(template_bytes)
+                wb = load_workbook(buf)
+            except Exception as e:
+                st.error(f"❌ アップロードした template.xlsx の読み込みに失敗しました: {e}")
+                st.stop()
+        else:
+            app_dir = Path(__file__).resolve().parent
+            template_path = app_dir / "template.xlsx"
+            if not template_path.exists():
+                st.error(
+                    f"❌ template.xlsx が見つかりませんでした（期待パス: {template_path}）。"
+                    "『ここで template.xlsx をアップロードして使う』を選ぶか、"
+                    "ファイルをプロジェクト直下に配置してください。"
+                )
+                st.stop()
+            try:
+                wb = load_workbook(template_path)
+            except Exception as e:
+                st.error(f"❌ template.xlsx の読み込みに失敗しました: {e}")
+                st.stop()
+
+        if "入力マスター" not in wb.sheetnames:
+            st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
+            st.stop()
+
+        sheet = wb["入力マスター"]
+
+        # 既存データ（2行目以降のB〜E）と塗りをクリア
+        for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+            for cell in row[1:5]:  # B〜E
+                cell.value = None
+                cell.fill = PatternFill(fill_type=None)
+
+        # 物流ハイライト
+        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        def is_logi(val: str) -> bool:
+            v = (val or "").strip()
+            return any(word in v for word in highlight_partial)
+
+        # データ書き込み
+        for idx, row in df.iterrows():
+            r = idx + 2
+            sheet.cell(row=r, column=2, value=row["企業名"])
+            sheet.cell(row=r, column=3, value=row["業種"])
+            sheet.cell(row=r, column=4, value=row["住所"])
+            sheet.cell(row=r, column=5, value=row["電話番号"])
+            if industry_option == "物流業" and is_logi(row["業種"]):
+                sheet.cell(row=r, column=3).fill = red_fill
+
+        # ダウンロード
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        st.download_button(
+            label=f"📥 整形済みリストをダウンロード（{filename_no_ext} / template反映）",
+            data=output,
+            file_name=f"{filename_no_ext}リスト.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        if removal_logs:
-            log_df = pd.DataFrame(removal_logs)
-            st.dataframe(log_df.head(300), use_container_width=True)
-            csv_bytes = log_df.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("🧾 削除ログをCSVでダウンロード", data=csv_bytes, file_name="removal_logs.csv", mime="text/csv")
-
-    # ===============================
-    # template.xlsx へ書き込み（OS互換強化）
-    # ===============================
-    # 1) アップロードされた template.xlsx を優先
-    wb = None
-    if template_upload is not None:
-        try:
-            buf = io.BytesIO(template_upload.read())
-            wb = load_workbook(buf)
-        except Exception as e:
-            st.error(f"❌ アップロードした template.xlsx の読み込みに失敗しました: {e}")
-            st.stop()
-    else:
-        # 2) スクリプト相対パスで解決（作業ディレクトリ差を吸収）
-        app_dir = Path(__file__).resolve().parent
-        template_path = app_dir / "template.xlsx"
-        if not template_path.exists():
-            st.error(f"❌ template.xlsx が見つかりませんでした（期待パス: {template_path}）。"
-                     "『ここで template.xlsx をアップロードして使う』を選ぶか、"
-                     "ファイルをプロジェクト直下に配置してください。")
-            st.stop()
-        try:
-            wb = load_workbook(template_path)
-        except Exception as e:
-            st.error(f"❌ template.xlsx の読み込みに失敗しました: {e}")
-            st.stop()
-
-    if "入力マスター" not in wb.sheetnames:
-        st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
-        st.stop()
-
-    sheet = wb["入力マスター"]
-
-    # 既存データ（2行目以降のB〜E）と塗りをクリア
-    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-        for cell in row[1:5]:  # B(1)〜E(4)
-            cell.value = None
-            cell.fill = PatternFill(fill_type=None)
-
-    # 物流ハイライト（業種に特定語が含まれる場合、C列を赤く）
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    def is_logi(val: str) -> bool:
-        v = (val or "").strip()
-        return any(word in v for word in highlight_partial)
-
-    # データ書き込み（B=企業名, C=業種, D=住所, E=電話）
-    for idx, row in df.iterrows():
-        r = idx + 2
-        sheet.cell(row=r, column=2, value=row["企業名"])
-        sheet.cell(row=r, column=3, value=row["業種"])
-        sheet.cell(row=r, column=4, value=row["住所"])
-        sheet.cell(row=r, column=5, value=row["電話番号"])
-        if industry_option == "物流業" and is_logi(row["業種"]):
-            sheet.cell(row=r, column=3).fill = red_fill
-
-    # ダウンロード
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    st.download_button(
-        label="📥 整形済みリストをダウンロード（template.xlsx 反映）",
-        data=output,
-        file_name=f"{filename_no_ext}リスト.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
 
 else:
     st.info("Excelファイルをアップロードしてください。NGリストxlsxは同フォルダに置くか、プロジェクト直下に配置してください。")

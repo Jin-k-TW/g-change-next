@@ -173,8 +173,8 @@ remove_exact = [
     "工務店", "写真店", "人材派遣業", "整備店", "倉庫", "肉店", "米販売店",
     "スーパーマーケット", "ロジスティクスサービス", "建材店",
     "自動車整備工場", "自動車販売店", "車体整備店", "協会/組織", "建設請負業者", "電器店", "家電量販店", "建築会社", "ハウス クリーニング業", "焼肉店",
-    "建築設計事務所","左官","作業服店","空調設備工事業者","金属スクラップ業者","害獣駆除サービス","モーター修理店","アーチェリーショップ","アスベスト検査業","事務用品店",
-    "測量士","配管業者","労働組合","ガス会社","ガソリンスタンド","ガラス/ミラー店","ワイナリー","屋根ふき業者","高等学校","金物店","史跡","商工会議所","清掃業","清掃業者","配管工"
+    "建築設計事務所", "左官", "作業服店", "空調設備工事業者", "金属スクラップ業者", "害獣駆除サービス", "モーター修理店", "アーチェリーショップ", "アスベスト検査業", "事務用品店",
+    "測量士", "配管業者", "労働組合", "ガス会社", "ガソリンスタンド", "ガラス/ミラー店", "ワイナリー", "屋根ふき業者", "高等学校", "金物店", "史跡", "商工会議所", "清掃業", "清掃業者", "配管工"
 ]
 remove_partial = ["販売店", "販売業者"]
 
@@ -324,9 +324,10 @@ if uploaded_files:
         removed_by_industry = 0
         if industry_option == "製造業":
             before = len(df)
-            df = df[~df["業種"].isin(remove_exact)]
-            if remove_partial:
-                pat = "|".join(map(re.escape, remove_partial))
+            # ★ remove_exact と remove_partial をまとめて「部分一致 NG キーワード」として扱う
+            all_ng_words = remove_exact + remove_partial
+            if all_ng_words:
+                pat = "|".join(map(re.escape, all_ng_words))
                 df = df[~df["業種"].str.contains(pat, na=False)]
             removed_by_industry = before - len(df)
             st.warning(f"🏭 製造業フィルター適用：{removed_by_industry}件を除外しました")
@@ -411,7 +412,7 @@ if uploaded_files:
         # --- サマリー＆削除ログDL ---
         with st.expander(f"📊 実行サマリー（詳細） - {uploaded_file.name}", expanded=False):
             st.markdown(
-                f"- フィルター除外（製造業 完全一致＋一部部分一致）: **{removed_by_industry}** 件\n"
+                f"- フィルター除外（製造業 部分一致）: **{removed_by_industry}** 件\n"
                 f"- NG（企業名 部分一致）削除: **{company_removed}** 件\n"
                 f"- NG（電話 digits一致）削除: **{phone_removed}** 件\n"
                 f"- 重複（電話 digits一致）削除: **{dup_removed}** 件\n"

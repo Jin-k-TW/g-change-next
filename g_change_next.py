@@ -232,41 +232,66 @@ highlight_partial = [
 # 業種ノイズ除去（レビュー/評価など）
 # ===============================
 def clean_industry_noise(s: str) -> str:
-    """業種カラムに紛れ込む『レビュー/評価/件数／レビューなし／なし』などのノイズを除去。"""
+    """
+    業種カラムに紛れ込む
+    - レビュー情報（レビュー・なし・…）
+    - Google のクチコミ
+    - ○件のレビュー／口コミ
+    などのノイズを除去する
+    """
     if not s:
         return ""
     t = str(s)
+    # 空白をゆるく正規化
+    t = re.sub(r"\s+", " ", t).strip()
 
     # 先頭の評価スコア + 件数 例: '4.7(123)・', '4.7（123）・'
-    t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*[・･]?\s*", "", t)
+    t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*(?:件)?\s*[・･]?\s*", "", t)
 
-    # 「○件のレビュー」「○件の口コミ」っぽい塊はまとめて削除
-    t = re.sub(r"\d+\s*件の?(レビュー|口コミ|クチコミ)", "", t)
+    # ------------ ここが今回のポイント ------------
+    # 「レビュー・なし・○○」のようなパターンを確実に削る
+    def norm_token(x: str) -> str:
+        return re.sub(r"\s+", "", x)
 
-    # 「・」「･」で分割してノイズ単語だけを除去
-    tokens = [p.strip() for p in re.split(r"[・･]", t) if p.strip() != ""]
+    noise_basic = {"レビュー", "レビューなし", "レビュー無し", "クチコミ", "口コミ"}
+    noise_nashi = {"なし"}
 
-    noise_tokens = {
-        "レビュー", "レビューなし", "レビュー無し", "レビュー無",
-        "Googleのクチコミ", "Google のクチコミ",
-        "口コミ", "クチコミ",
-        "なし"
-    }
+    # 先頭が「レビュー」で始まるときは、トークン単位でノイズを除去
+    if t.startswith("レビュー"):
+        parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
+        if not parts:
+            return ""
 
-    cleaned = []
-    for tok in tokens:
-        # ノイズならスキップ
-        if tok in noise_tokens:
-            continue
-        # 「○件のレビュー」「○件の口コミ」がここに来ているパターンも念のためカット
-        if re.fullmatch(r"\d+\s*件の?(レビュー|口コミ|クチコミ)", tok):
-            continue
-        cleaned.append(tok)
+        if len(parts) == 1:
+            pn = norm_token(parts[0])
+            if pn in noise_basic or pn in noise_nashi:
+                return ""
+            return parts[0]
 
-    # 有効なトークンだけを「・」で再結合
-    t = "・".join(cleaned)
+        cleaned_parts = []
+        for p in parts:
+            pn = norm_token(p)
+            if pn in noise_basic or pn in noise_nashi:
+                # 「レビュー」「レビューなし」「なし」などは捨てる
+                continue
+            cleaned_parts.append(p)
 
-    # 余計な「・」や空白をトリミング
+        if not cleaned_parts:
+            return ""
+        return "・".join(cleaned_parts)
+
+    # 「Google のクチコミ」「口コミ」「クチコミ」などが途中にある場合
+    t = re.sub(r"(?:^|[・･])\s*(Google\s*の?\s*クチコミ|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
+    # 「◯件のレビュー」「◯件の口コミ」など
+    t = re.sub(r"[・･]?\s*\d+\s*件の?(レビュー|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
+
+    # 分割して空要素を削除
+    parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
+    if not parts:
+        return ""
+    t = "・".join(parts)
+
+    # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
     return t
 

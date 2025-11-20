@@ -9,9 +9,54 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
 # ===============================
+# 簡易ログイン（パスワード認証）
+# ===============================
+def check_password():
+    """st.secrets['password'] と一致するかを確認する簡易ログイン"""
+    def password_entered():
+        """テキストボックスに入力されたパスワードを検証"""
+        if "password" not in st.secrets:
+            st.session_state["password_correct"] = False
+            st.session_state["password_error"] = "サーバー側にパスワードが設定されていません。管理者に確認してください。"
+            return
+
+        if st.session_state["password"] == st.secrets["password"]:
+            st.session_state["password_correct"] = True
+            st.session_state.pop("password", None)  # パスワード文字列は消しておく
+            st.session_state.pop("password_error", None)
+        else:
+            st.session_state["password_correct"] = False
+            st.session_state["password_error"] = "パスワードが違います。もう一度入力してください。"
+
+    # 初回：パスワード入力欄を表示
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        st.title("🔐 G-Change Next ログイン")
+        st.text_input(
+            "パスワードを入力してください",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        if "password_error" in st.session_state and st.session_state["password_error"]:
+            st.error(st.session_state["password_error"])
+        # ここで処理をストップ（アプリ本体はまだ表示しない）
+        return False
+
+    # 認証済み
+    return True
+
+# ===============================
 # Streamlit設定
 # ===============================
 st.set_page_config(page_title="G-Change Next", layout="wide")
+
+# ▼ここでログインチェック。失敗したら以降の処理は実行されない
+if not check_password():
+    st.stop()
+
 st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.3 複数ファイル対応＋確定ボタン省略版）")
 
 # ===============================
@@ -324,7 +369,7 @@ if uploaded_files:
         removed_by_industry = 0
         if industry_option == "製造業":
             before = len(df)
-            # ★ remove_exact と remove_partial をまとめて「部分一致 NG キーワード」として扱う
+            # remove_exact と remove_partial をまとめて「部分一致 NG キーワード」として扱う
             all_ng_words = remove_exact + remove_partial
             if all_ng_words:
                 pat = "|".join(map(re.escape, all_ng_words))

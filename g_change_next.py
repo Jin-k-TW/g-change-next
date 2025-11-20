@@ -232,38 +232,42 @@ highlight_partial = [
 # 業種ノイズ除去（レビュー/評価など）
 # ===============================
 def clean_industry_noise(s: str) -> str:
-    """
-    業種カラムに紛れ込む『レビュー/評価/件数／レビューなし／口コミ／クチコミ』
-    などのノイズ部分を削除する。
-    """
+    """業種カラムに紛れ込む『レビュー/評価/件数／レビューなし／なし』などのノイズを除去。"""
     if not s:
         return ""
-    t = str(s).strip()
+    t = str(s)
 
-    # 「・」「･」で分割して、ノイズだけを落とす
-    parts = re.split(r"[・･]", t)
-    cleaned_parts = []
-    for p in parts:
-        p = p.strip()
-        if not p:
+    # 先頭の評価スコア + 件数 例: '4.7(123)・', '4.7（123）・'
+    t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*[・･]?\s*", "", t)
+
+    # 「○件のレビュー」「○件の口コミ」っぽい塊はまとめて削除
+    t = re.sub(r"\d+\s*件の?(レビュー|口コミ|クチコミ)", "", t)
+
+    # 「・」「･」で分割してノイズ単語だけを除去
+    tokens = [p.strip() for p in re.split(r"[・･]", t) if p.strip() != ""]
+
+    noise_tokens = {
+        "レビュー", "レビューなし", "レビュー無し", "レビュー無",
+        "Googleのクチコミ", "Google のクチコミ",
+        "口コミ", "クチコミ",
+        "なし"
+    }
+
+    cleaned = []
+    for tok in tokens:
+        # ノイズならスキップ
+        if tok in noise_tokens:
             continue
-
-        # 評価スコア + 件数っぽいもの: 4.7(123) / 4.7（123）
-        if re.search(r"\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]", p):
+        # 「○件のレビュー」「○件の口コミ」がここに来ているパターンも念のためカット
+        if re.fullmatch(r"\d+\s*件の?(レビュー|口コミ|クチコミ)", tok):
             continue
+        cleaned.append(tok)
 
-        # 「○件のレビュー／口コミ／クチコミ」
-        if re.search(r"\d+\s*件\s*の?\s*(レビュー|口コミ|クチコミ)", p):
-            continue
+    # 有効なトークンだけを「・」で再結合
+    t = "・".join(cleaned)
 
-        # 「Googleのクチコミ」「レビュー」「レビューなし」「口コミ」「クチコミ」などを含むもの
-        if any(word in p for word in ["Google のクチコミ", "Googleのクチコミ", "レビューなし", "レビュー", "口コミ", "クチコミ"]):
-            continue
-
-        cleaned_parts.append(p)
-
-    # 残ったものを「・」で再結合
-    t = "・".join(cleaned_parts).strip(" ・･")
+    # 余計な「・」や空白をトリミング
+    t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
     return t
 
 # ===============================

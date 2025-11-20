@@ -490,7 +490,7 @@ if uploaded_files:
         # ★ 開拓先リストの印刷範囲を強制的に A〜L 列に設定
         if "開拓先リスト" in wb.sheetnames:
             sheet_kaitaku = wb["開拓先リスト"]
-        # 列全体 A〜L を印刷範囲として指定（Excel上では A〜L 全列が印刷対象になる）
+            # 列全体 A〜L を印刷範囲として指定（Excel上では A〜L 全列が印刷対象になる）
             sheet_kaitaku.print_area = "A:L"
 
         # ダウンロード（ファイルごとに別ボタン）

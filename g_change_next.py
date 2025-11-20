@@ -487,12 +487,6 @@ if uploaded_files:
             if industry_option == "物流業" and is_logi(row["業種"]):
                 sheet.cell(row=r, column=3).fill = red_fill
 
-        # ★ 開拓先リストの印刷範囲を強制的に A〜L 列に設定
-        if "開拓先リスト" in wb.sheetnames:
-            sheet_kaitaku = wb["開拓先リスト"]
-            # 列全体 A〜L を印刷範囲として指定（Excel上では A〜L 全列が印刷対象になる）
-            sheet_kaitaku.print_area = "A:L"
-
         # ダウンロード（ファイルごとに別ボタン）
         output = io.BytesIO()
         wb.save(output)

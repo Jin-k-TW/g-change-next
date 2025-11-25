@@ -121,10 +121,9 @@ def phone_digits_only(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
 
 # ===============================
-# 住所判定＋業種分割ロジック（NEW）
+# 住所判定＋業種分割ロジック（強化版）
 # ===============================
 
-# 47都道府県名
 JAPAN_PREFS = [
     "北海道",
     "青森県","岩手県","宮城県","秋田県","山形県","福島県",
@@ -140,29 +139,59 @@ JAPAN_PREFS = [
 def split_industry_and_address(line: str):
     """
     1セルに「業種 + 住所」が入っているケースを想定。
-    住所の先頭（都道府県名）を探し、左側を業種、右側を住所として返す。
-    見つからなければ ( '', '' ) を返す。
+    左側 = 業種, 右側 = 住所 として分割する。
+
+    住所の開始位置は次の順で探す：
+      1) 都道府県名
+      2) 「市 / 区 / 郡 / 町 / 村」など
+      3) 郵便番号 (123-4567 / 〒123-4567)
+      4) 最初の数字
+    見つからない場合は (\"\", \"\") を返して旧ロジックにフォールバック。
     """
     if not line:
         return ("", "")
+
     s = normalize_text(line)
 
-    # 都道府県名のうち最も手前で登場するものを探す
     addr_pos = None
+
+    # 1) 都道府県名
     for pref in JAPAN_PREFS:
         idx = s.find(pref)
         if idx != -1 and (addr_pos is None or idx < addr_pos):
             addr_pos = idx
 
+    # 2) 市/区/郡/町/村 など（都道府県が見つからなかったとき）
     if addr_pos is None:
-        # 都道府県が見つからない → 住所と判断できない
+        m_city = re.search(r".{0,5}(市|区|郡|町|村)", s)
+        if m_city:
+            addr_pos = max(0, m_city.start())
+
+    # 3) 郵便番号 (123-4567 / 〒123-4567)
+    if addr_pos is None:
+        m_zip = re.search(r"〒?\d{3}-\d{4}", s)
+        if m_zip:
+            addr_pos = m_zip.start()
+
+    # 4) 最初の数字（番地・丁目など）
+    if addr_pos is None:
+        m_num = re.search(r"\d", s)
+        if m_num:
+            addr_pos = m_num.start()
+
+    # それでも見つからない → 住所とは判断しない（旧ロジックに任せる）
+    if addr_pos is None:
         return ("", "")
 
     industry = s[:addr_pos].strip(" ・:：　")
-    address = s[addr_pos:].strip()
+    address  = s[addr_pos:].strip()
 
-    # 住所っぽさが弱い場合に備えて、最低限のチェック（県・市・区のいずれかが含まれる）
-    if not re.search(r"[県都道府県市区郡町村]", address):
+    # 住所候補があまりに住所っぽくない場合はフォールバック
+    if not address:
+        return ("", "")
+
+    # 市区町村 or 数字が一切無い場合は住所とみなさない
+    if not re.search(r"[市区郡町村]", address) and not re.search(r"\d", address):
         return ("", "")
 
     return (industry, address)

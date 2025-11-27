@@ -253,14 +253,22 @@ KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
 
 def is_company_candidate(text: str) -> bool:
     """企業名として使えそうかどうか"""
+
     s = normalize_text(text)
     if not s:
         return False
 
-    # ノイズっぽいキーワード
+    # ★ ナビ系リンク（ルート・乗換など）は必ず除外 ★
+    #   例）「ルート・乗換」「ルート案内」「経路案内」など
+    if (
+        "ルート" in s and ("乗換" in s or "乗り換え" in s or "経路" in s)
+    ) or "経路案内" in s:
+        return False
+
+    # ノイズっぽいキーワード（企業名にはなり得ないもの）
     noise_words = [
         "ウェブサイト", "Web サイト", "web サイト",
-        "ルート", "経路案内",
+        "ルート", "経路案内",          # ← 保険としてここにも残しておく
         "共有",
         "営業", "営業時間",
         "クチコミ", "口コミ", "レビュー", "件の", "評価",

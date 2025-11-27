@@ -212,8 +212,7 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 
 
 # ===============================
-# ★ 新プロファイル用のヘルパー
-#    （ヘッダーなし・業種＋住所同セル）
+# ★ 新プロファイル用のヘルパー（ヘッダーなし・業種＋住所同セル）
 # ===============================
 JP_LOC_PATTERN = re.compile(r"(丁目|番地?|号|市|区|町|村|郡|県|府|道)")
 
@@ -227,6 +226,7 @@ def is_address_like(text: str) -> bool:
     has_block = bool(re.search(r"\d{1,3}[-－ー‐]\d{1,3}", t))
     if has_digit and (has_loc_word or has_block):
         return True
+    # それ以外はかなり緩めに弾く
     return False
 
 def split_industry_address(text: str):
@@ -234,6 +234,7 @@ def split_industry_address(text: str):
     t = normalize_text(text)
     if not t:
         return "", ""
+    # 右から1つ目の区切りを探す
     last_pos = -1
     for ch in ["·", "・", "･"]:
         p = t.rfind(ch)
@@ -251,45 +252,37 @@ def split_industry_address(text: str):
 
 KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
 
-# ★ 追加：レビュー行・コメント行かどうか
-def is_review_or_comment(text: str) -> bool:
+def is_company_candidate(text: str) -> bool:
     """
-    レビュー点数・件数・ルート案内・ウェブサイト等
-    「企業名ではあり得ない補足情報」の行を True とする
+    企業名として使えそうかどうか。
+    - ルート・乗換 / ウェブサイト / クチコミ / レビュー / 営業時間 などは除外
+    - 評価数値 5.0(1) や 3.2 などの数値行も除外
     """
     s = normalize_text(text)
     if not s:
         return False
 
-    # ウェブサイトやルート案内など
+    # ノイズっぽいキーワード
     noise_words = [
         "ウェブサイト", "Web サイト", "web サイト",
-        "ルート", "乗換", "経路案内",
-        "経路", "共有",
-        "クチコミ", "口コミ", "レビュー", "件の",
-        "写真を追加", "写真を表示",
+        "ルート・乗換", "ルート･乗換", "ルート ・乗換",
+        "経路案内",
+        "共有",
+        "営業", "営業時間", "営業開始", "営業時間外",
+        "クチコミ", "口コミ", "レビュー", "件の", "閉店",
     ]
     if any(w in s for w in noise_words):
-        return True
-
-    # 5.0(1) / 3.8 (5) など「評価 + 件数」
-    if re.match(r"^\d+(?:\.\d+)?\s*\(.+?\)\s*$", s):
-        return True
-
-    # ★ 追加修正：3.8 / 4.0 / -3.8 / -34 など「数値だけ」の行もレビュー扱い
-    if re.match(r"^[\-−]?\d+(?:\.\d+)?\s*$", s):
-        return True
-
-    return False
-
-def is_company_candidate(text: str) -> bool:
-    """企業名として使えそうかどうか"""
-    s = normalize_text(text)
-    if not s:
         return False
 
-    # レビューやルート・ウェブサイト行などは即除外
-    if is_review_or_comment(s):
+    # レビュー点数形式: 5.0(1) など
+    if re.match(r"^\d+(?:\.\d+)?\s*\(.+\)\s*$", s):
+        return False
+
+    # 先頭が数字 or 記号で、ほぼ数値だけの行は除外
+    if re.match(r"^[\d\.\-\+\s]+$", s):
+        return False
+    if s[0] in "0123456789-＋+.":
+        # ほぼ数値から始まる行は企業名とはみなさない
         return False
 
     # ひらがな・カタカナ・漢字・英字が少なくとも1つ
@@ -297,6 +290,32 @@ def is_company_candidate(text: str) -> bool:
         return False
 
     return True
+
+def find_company_from_route(col, addr_idx, max_steps=20):
+    """
+    住所行より上をさかのぼり、
+    「ルート・乗換」と書かれている行を見つけたら、
+    その1行下を企業名とみなす。
+    見つからない場合のみ、is_company_candidate で fallback。
+    """
+    bottom = max(0, addr_idx - max_steps)
+
+    # ① ルート・乗換 ルールで探す
+    for k in range(addr_idx - 1, bottom - 1, -1):
+        txt = normalize_text(col[k])
+        if "ルート・乗換" in txt:
+            target_row = k + 1
+            if target_row < addr_idx:
+                return normalize_text(col[target_row])
+            # 「ルート・乗換」と住所が隣接していたら企業名なしと判断
+            break
+
+    # ② 保険として、従来の候補判定で探す
+    for k in range(addr_idx - 1, bottom - 1, -1):
+        if is_company_candidate(col[k]):
+            return normalize_text(col[k])
+
+    return ""
 
 def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     """
@@ -306,6 +325,7 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     を抽出する。
     """
     df0 = df_like.fillna("")
+    # 1列目だけを見る前提
     col = df0.iloc[:, 0].astype(str).tolist()
     results = []
 
@@ -329,12 +349,8 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
         industry = extract_industry(ind_raw)
         address = clean_address(addr_raw)
 
-        # さらに上方向に企業名候補を探す
-        company = ""
-        for k in range(addr_idx - 1, -1, -1):
-            if is_company_candidate(col[k]):
-                company = normalize_text(col[k])
-                break
+        # 会社名を「ルート・乗換」ルール＋fallbackで取得
+        company = find_company_from_route(col, addr_idx)
         if not company:
             continue
 
@@ -365,7 +381,7 @@ highlight_partial = [
 ]
 
 # ===============================
-# 業種ノイズ除去（レビュー/評価など ＋ □ノイズ）
+# 業種ノイズ除去（レビュー/評価など）
 # ===============================
 def clean_industry_noise(s: str) -> str:
     """
@@ -374,8 +390,7 @@ def clean_industry_noise(s: str) -> str:
     - Google のクチコミ
     - ○件のレビュー／口コミ
     などのノイズを除去する
-    ＋ 最後に「·」「レビュ-なし」「空白だけ」
-      ＋ 末尾の文字化けっぽい記号（四角・制御文字など）を必ず消す
+    ＋ 最後に「·」「レビュ-なし」「□」などのゴミは必ず消す
     """
     if not s:
         return ""
@@ -423,18 +438,12 @@ def clean_industry_noise(s: str) -> str:
     # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    # ★ここで「末尾の文字化けっぽい記号」を一気に削除
-    #   → 日本語・英数字・丸カッコ 以外が末尾に連続している部分を落とす
-    t = re.sub(
-        r"[^0-9A-Za-z\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF（）\(\)]+$",
-        "",
-        t
-    ).strip()
-
-    # ▼▼▼ 「必ず消す」部分 ▼▼▼
+    # ▼▼▼ ここが「必ず消す」部分 ▼▼▼
+    # 中黒「·」や「レビュ-なし」、文字化けっぽい □ や � を強制削除
     if t:
-        for trash in ["·", "レビュ-なし"]:
+        for trash in ["·", "レビュ-なし", "□", "�"]:
             t = t.replace(trash, "")
+        # ついでに全角/半角スペースだけになった場合も空にする
         t = re.sub(r"\s+", " ", t).strip()
 
     return t if t else ""
@@ -447,10 +456,12 @@ def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["企業名", "業種", "住所"]:
         df[c] = df[c].map(normalize_text)
     df["業種"] = df["業種"].map(clean_industry_noise)
+    # 文字化け□が残っていたらもう一段階で消す
+    df["業種"] = df["業種"].str.replace("□", "", regex=False).str.replace("�", "", regex=False)
     return df.fillna("")
 
 # ===============================
-# UI（NGリスト選択・抽出方式・業種カテゴリ・テンプレ入力）
+# UI（NGリスト選択・抽出方式・業種カテゴリ・テンプレート入力）
 # ===============================
 st.markdown("### 🛡️ 使用するNGリストを選択")
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]

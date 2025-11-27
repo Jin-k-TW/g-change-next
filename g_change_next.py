@@ -212,7 +212,8 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 
 
 # ===============================
-# ★ 新プロファイル用のヘルパー（ヘッダーなし・業種＋住所同セル）
+# ★ 新プロファイル用ヘルパー
+#   （ヘッダーなし・業種＋住所が同セル）
 # ===============================
 JP_LOC_PATTERN = re.compile(r"(丁目|番地?|号|市|区|町|村|郡|県|府|道)")
 
@@ -233,97 +234,41 @@ def split_industry_address(text: str):
     t = normalize_text(text)
     if not t:
         return "", ""
-    # 右から1つ目の区切りを探す
     last_pos = -1
     for ch in ["·", "・", "･"]:
         p = t.rfind(ch)
         if p > last_pos:
             last_pos = p
     if last_pos == -1:
-        # 区切りがなければ全体を住所扱い
         return "", t.strip()
     left = t[:last_pos].strip()
     right = t[last_pos + 1 :].strip()
     if not right:
-        # 右側が空なら住所扱いに倒す
         return "", left
     return left, right
 
 KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
 
-def is_company_candidate(text: str) -> bool:
-    """企業名として使えそうかどうか"""
-
+def is_review_or_comment(text: str) -> bool:
+    """レビュー・コメント系の行かどうか"""
     s = normalize_text(text)
     if not s:
         return False
-
-    # ★ ナビ系リンク（ルート・乗換など）は必ず除外 ★
-    #   例）「ルート・乗換」「ルート案内」「経路案内」など
-    if (
-        "ルート" in s and ("乗換" in s or "乗り換え" in s or "経路" in s)
-    ) or "経路案内" in s:
-        return False
-
-    # ノイズっぽいキーワード（企業名にはなり得ないもの）
-    noise_words = [
-        "ウェブサイト", "Web サイト", "web サイト",
-        "ルート", "経路案内",          # ← 保険としてここにも残しておく
-        "共有",
-        "営業", "営業時間",
-        "クチコミ", "口コミ", "レビュー", "件の", "評価",
-    ]
-    if any(w in s for w in noise_words):
-        return False
-
-    # レビュー点数形式: 5.0(1) など
-    if re.match(r"^\d+(?:\.\d+)?\s*\(.+\)\s*$", s):
-        return False
-
-    # ひらがな・カタカナ・漢字・英字が少なくとも1つ
-    if not re.search(rf"[{KANJI_KATA_HIRA}A-Za-z]", s):
-        return False
-
-    return True
-
-def is_review_or_comment(s: str) -> bool:
-    """レビューやコメントらしい行かどうかを判定"""
-    t = normalize_text(s)
-    if not t:
-        return False
-
-    # 明示的なレビュー系キーワード
-    review_words = [
-        "クチコミ", "口コミ", "レビュー",
-        "件のクチコミ", "件の口コミ", "件のレビュー",
-        "評価", "星", "満足", "不満"
-    ]
-    if any(w in t for w in review_words):
+    # 5.0(1) / 3.8(23) など
+    if re.match(r"^\d+(?:\.\d+)?\s*\(\d+.*\)\s*$", s):
         return True
-
-    # コメントっぽい表現
-    comment_phrases = [
-        "思います", "思いました", "感じ", "雰囲気",
-        "利用しました", "利用させて", "利用して",
-        "でした", "でした。", "してくれ", "していただき",
-        "良かった", "良くして", "悪かった"
-    ]
-    if any(p in t for p in comment_phrases):
+    # クチコミ / 口コミ / レビュー / 評価 など
+    if any(w in s for w in ["クチコミ", "口コミ", "レビュー", "評価", "件のクチコミ", "件の口コミ"]):
         return True
+    return False
 
-    # 文章末尾の句読点など
-    if any(p in t for p in ["。", "！", "？", "!", "?"]):
-        # ただし会社名っぽいキーワードがあれば会社扱い
-        company_words = [
-            "株式会社", "（株）", "(株)", "有限会社",
-            "工業", "製作所", "製造", "加工", "工場",
-            "センター", "事業所", "営業所", "倉庫",
-            "サービス", "商事", "運輸", "物流", "設備",
-            "興業", "機械", "工機"
-        ]
-        if not any(w in t for w in company_words):
-            return True
-
+def is_route_line(text: str) -> bool:
+    """ルート・乗換などナビ系の行かどうか"""
+    s = normalize_text(text)
+    if not s:
+        return False
+    if "ルート" in s or "乗換" in s or "乗り換え" in s or "経路案内" in s or "経路" in s:
+        return True
     return False
 
 def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
@@ -334,7 +279,6 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     を抽出する。
     """
     df0 = df_like.fillna("")
-    # 1列目だけを見る前提
     col = df0.iloc[:, 0].astype(str).tolist()
     results = []
 
@@ -361,21 +305,20 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
         # さらに上方向に企業名候補を探す
         company = ""
         for k in range(addr_idx - 1, -1, -1):
-            raw = str(col[k]).strip()
-            if not raw:
+            cand = normalize_text(col[k])
+            if not cand:
                 continue
-            s = normalize_text(raw)
-
-            # 評価スコア行（5.0(1)など）はスキップ
-            if re.match(r"^\d+(?:\.\d+)?\s*\(.+\)\s*$", s):
+            # レビュー／コメント行は飛ばす
+            if is_review_or_comment(cand):
                 continue
-            # レビュー／コメント行はスキップ
-            if is_review_or_comment(s):
+            # ルート・乗換などナビ行は飛ばす
+            if is_route_line(cand):
                 continue
-            # 企業名候補なら採用
-            if is_company_candidate(s):
-                company = s
-                break
+            # 記号だけなどは除外
+            if not re.search(rf"[{KANJI_KATA_HIRA}A-Za-z0-9]", cand):
+                continue
+            company = cand
+            break
 
         if not company:
             continue
@@ -407,15 +350,16 @@ highlight_partial = [
 ]
 
 # ===============================
-# 業種ノイズ除去（レビュー/評価など＋末尾ノイズ）
+# 業種ノイズ除去（レビュー/評価など）
 # ===============================
 def clean_industry_noise(s: str) -> str:
     """
-    業種カラムに紛れ込むノイズを除去
+    業種カラムに紛れ込む
     - レビュー情報（レビュー・なし・…）
     - Google のクチコミ
     - ○件のレビュー／口コミ
-    - 末尾の「□」など図形記号
+    などのノイズを除去する
+    ＋ 最後に「·」「レビュ-なし」「空白だけ」「□」などは必ず消す
     """
     if not s:
         return ""
@@ -423,38 +367,13 @@ def clean_industry_noise(s: str) -> str:
     # 空白をゆるく正規化
     t = re.sub(r"\s+", " ", t).strip()
 
-    # 先頭の評価スコア + 件数 例: '4.7(123)・', '4.7（123）・'
+    # 先頭の評価スコア + 件数
     t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*(?:件)?\s*[・･]?\s*", "", t)
 
-    # ---- 「レビュー・なし・○○」系をトークン単位で処理 ----
-    def norm_token(x: str) -> str:
-        return re.sub(r"\s+", "", x)
-
-    noise_basic = {"レビュー", "レビューなし", "レビュー無し", "クチコミ", "口コミ"}
-    noise_nashi = {"なし"}
-
-    if t.startswith("レビュー"):
-        parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
-        if not parts:
-            return ""
-
-        # 全部ノイズなら空にする
-        if all(norm_token(p) in noise_basic | noise_nashi for p in parts):
-            return ""
-
-        cleaned_parts = []
-        for p in parts:
-            pn = norm_token(p)
-            if pn in noise_basic or pn in noise_nashi:
-                continue
-            cleaned_parts.append(p)
-
-        t = "・".join(cleaned_parts)
-    else:
-        # 「Google のクチコミ」「口コミ」「クチコミ」などが途中にある場合
-        t = re.sub(r"(?:^|[・･])\s*(Google\s*の?\s*クチコミ|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
-        # 「◯件のレビュー」「◯件の口コミ」など
-        t = re.sub(r"[・･]?\s*\d+\s*件の?(レビュー|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
+    # 「Google のクチコミ」「口コミ」「クチコミ」など
+    t = re.sub(r"(?:^|[・･])\s*(Google\s*の?\s*クチコミ|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
+    # 「◯件のレビュー／口コミ」など
+    t = re.sub(r"[・･]?\s*\d+\s*件の?(レビュー|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
 
     # 分割して空要素を削除
     parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
@@ -463,13 +382,10 @@ def clean_industry_noise(s: str) -> str:
     # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    # 中黒「·」や「レビュ-なし」を強制削除
+    # 中黒「·」や「レビュ-なし」、四角系ノイズを強制削除
     if t:
-        for trash in ["·", "レビュ-なし"]:
+        for trash in ["·", "レビュ-なし", "□", "◻︎", "■"]:
             t = t.replace(trash, "")
-        # 文字化けの四角や図形記号を削除
-        t = re.sub(r"[\u25A0-\u25FF]", "", t)  # ■□▲◆など
-        # ついでに全角/半角スペースだけになった場合も空にする
         t = re.sub(r"\s+", " ", t).strip()
 
     return t if t else ""

@@ -252,10 +252,32 @@ def split_industry_address(text: str):
 
 KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
 
+def is_rating_or_review_line(text: str) -> bool:
+    """評価数値やレビュー行かどうか"""
+    s = normalize_text(text)
+    if not s:
+        return False
+    # 5.0(1) / 3.8(24) など
+    if re.match(r"^\d+(?:\.\d+)?\s*\(.*\)\s*$", s):
+        return True
+    # 5.0 / 3.8 など数値だけ
+    if re.match(r"^\d+(?:\.\d+)?\s*$", s):
+        return True
+    # レビュー・口コミ関連の文
+    if re.search(r"(レビュー|口コミ|クチコミ)", s):
+        return True
+    if re.search(r"\d+\s*件の?(レビュー|口コミ|クチコミ|評価)", s):
+        return True
+    return False
+
 def is_company_candidate(text: str) -> bool:
     """企業名として使えそうかどうか"""
     s = normalize_text(text)
     if not s:
+        return False
+
+    # レビュー行・評価数値行は除外
+    if is_rating_or_review_line(s):
         return False
 
     # ノイズっぽいキーワード
@@ -269,8 +291,12 @@ def is_company_candidate(text: str) -> bool:
     if any(w in s for w in noise_words):
         return False
 
-    # レビュー点数形式: 5.0(1) など
-    if re.match(r"^\d+(?:\.\d+)?\s*\(.+\)\s*$", s):
+    # 文末が「。」「！」「？」で終わる文章はコメントとみなして除外
+    if s.endswith(("。", "！", "!", "？", "?")):
+        return False
+
+    # 文字数が短すぎるものは除外
+    if len(s) <= 2:
         return False
 
     # ひらがな・カタカナ・漢字・英字が少なくとも1つ
@@ -314,8 +340,15 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
         # さらに上方向に企業名候補を探す
         company = ""
         for k in range(addr_idx - 1, -1, -1):
-            if is_company_candidate(col[k]):
-                company = normalize_text(col[k])
+            txt = col[k]
+            if not txt or str(txt).strip() == "":
+                continue
+            # レビュー行・評価数値行はスキップ（企業名より上に来る前提）
+            if is_rating_or_review_line(txt):
+                continue
+            # 企業名候補でなければ、その上を引き続き探す
+            if is_company_candidate(txt):
+                company = normalize_text(txt)
                 break
         if not company:
             continue
@@ -356,7 +389,7 @@ def clean_industry_noise(s: str) -> str:
     - Google のクチコミ
     - ○件のレビュー／口コミ
     などのノイズを除去する
-    ＋ 最後に「·」「レビュ-なし」「空白だけ」は必ず消す
+    ＋ 最後に「·」「レビュ-なし」「空白だけ」や四角いノイズ文字は必ず消す
     """
     if not s:
         return ""
@@ -404,11 +437,18 @@ def clean_industry_noise(s: str) -> str:
     # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    # ▼▼▼ ここが「必ず消す」部分 ▼▼▼
-    # 中黒「·」や「レビュ-なし」を強制削除
+    # ▼▼▼ ここが「必ず消す」部分 ＋ ノイズ記号削除 ▼▼▼
     if t:
+        # 中黒「·」や「レビュ-なし」を強制削除
         for trash in ["·", "レビュ-なし"]:
             t = t.replace(trash, "")
+
+        # 四角い文字や置換文字などのノイズを削除（□ ■ � など）
+        t = re.sub(r"[□■�]+", "", t)
+
+        # 制御文字も削除
+        t = re.sub(r"[\u0000-\u001F\u007F]", "", t)
+
         # ついでに全角/半角スペースだけになった場合も空にする
         t = re.sub(r"\s+", " ", t).strip()
 

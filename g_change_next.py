@@ -216,6 +216,17 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 # ===============================
 JP_LOC_PATTERN = re.compile(r"(丁目|番地?|号|市|区|町|村|郡|県|府|道)")
 
+def is_hours_or_business_line(text: str) -> bool:
+    """営業時間・診療時間系の行かどうか（住所候補からは除外）"""
+    t = normalize_text(text)
+    if not t:
+        return False
+    keywords = [
+        "営業時間", "営業中", "営業時間外", "営業開始",
+        "まもなく営業開始", "診療時間", "診察時間",
+    ]
+    return any(k in t for k in keywords)
+
 def is_address_like(text: str) -> bool:
     """
     住所らしいかどうかの判定（強化版）

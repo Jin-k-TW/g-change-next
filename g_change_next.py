@@ -128,7 +128,7 @@ def phone_digits_only(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
 
 # ===============================
-# 抽出プロファイル（既存3方式＋拡張）
+# 抽出プロファイル（既存3方式）
 # ===============================
 # 1) Google検索リスト（縦読み・電話上下）
 def extract_google_vertical(lines):
@@ -215,51 +215,46 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 # ★ 新プロファイル用のヘルパー（ヘッダーなし・業種＋住所同セル）
 # ===============================
 JP_LOC_PATTERN = re.compile(r"(丁目|番地?|号|市|区|町|村|郡|県|府|道)")
-KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
-PHONE_INLINE_RE = re.compile(r"[0-9０-９]{2,4}[-－ー‐][0-9０-９]{2,4}[-－ー‐][0-9０-９]{3,4}")
+
+def is_hours_or_business_line(text: str) -> bool:
+    """営業時間・診療時間系の行かどうか（住所候補からは除外）"""
+    t = normalize_text(text)
+    if not t:
+        return False
+    keywords = [
+        "営業時間", "営業中", "営業時間外", "営業開始",
+        "まもなく営業開始", "診療時間", "診察時間",
+    ]
+    return any(k in t for k in keywords)
 
 def is_address_like(text: str) -> bool:
-    """
-    住所らしいかどうかのゆるい判定
-    例:
-      「クリニック・医院・診療所・今之浦１丁目１－８」
-      「病院・診療所・中泉703」
-    """
+    """住所らしいかどうかのゆるい判定"""
     t = normalize_text(text)
     if not t:
         return False
 
-    # 営業時間行は住所扱いしない
-    if "営業時間" in t or "営業中" in t or "営業終了" in t:
+    # ★ 営業時間系の行は住所扱いしない
+    if is_hours_or_business_line(t):
         return False
 
     has_digit = bool(re.search(r"\d", t))
     has_loc_word = bool(JP_LOC_PATTERN.search(t))
     has_block = bool(re.search(r"\d{1,3}[-－ー‐]\d{1,3}", t))
-    ends_with_digit = bool(re.search(r"\d+$", t))
-    has_jp = bool(re.search(rf"[{KANJI_KATA_HIRA}]", t))
 
-    # 日本語＋数字が入っていないものは住所とみなさない
-    if not (has_digit and has_jp):
-        return False
+    if has_digit and (has_loc_word or has_block):
+        return True
 
-    # いずれかを満たせば住所扱い
-    if has_loc_word or has_block or ends_with_digit:
+    # 数字がなくても「○○市」「○○町」など住所語だけのケースを弱めに許可
+    if has_loc_word and not has_digit:
         return True
 
     return False
 
 def split_industry_address(text: str):
-    """セル内の右端の「·/・/･」で業種と住所に分割し、住所の末尾に紛れた電話は削る"""
+    """セル内の右端の「·/・/･」で業種と住所に分割"""
     t = normalize_text(text)
     if not t:
         return "", ""
-
-    # 住所側にくっついている電話を削る
-    m = PHONE_INLINE_RE.search(t)
-    if m:
-        t = t[:m.start()].rstrip()
-
     # 右から1つ目の区切りを探す
     last_pos = -1
     for ch in ["·", "・", "･"]:
@@ -269,13 +264,14 @@ def split_industry_address(text: str):
     if last_pos == -1:
         # 区切りがなければ全体を住所扱い
         return "", t.strip()
-
     left = t[:last_pos].strip()
-    right = t[last_pos + 1:].strip()
+    right = t[last_pos + 1 :].strip()
     if not right:
         # 右側が空なら住所扱いに倒す
         return "", left
     return left, right
+
+KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
 
 def is_company_candidate(text: str) -> bool:
     """企業名として使えそうかどうか"""
@@ -286,23 +282,25 @@ def is_company_candidate(text: str) -> bool:
     # 無視したいキーワード
     noise_words = [
         "ウェブサイト", "Web サイト", "web サイト",
-        "ルート・乗換", "ルート · 乗換", "ルート", "経路案内",
         "オンラインで予約",
+        "ルート・乗換", "経路案内",
         "共有",
+        "営業中", "営業時間", "営業時間外", "営業開始",
         "クチコミはありません",
-        "クチコミ", "口コミ", "レビュー", "件のレビュー",
+        "口コミ", "クチコミ", "レビュー", "件の",
     ]
     if any(w in s for w in noise_words):
         return False
 
-    # 評価スコア単独 (2.8, -22 など)
-    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", s):
-        return False
-    # 4.4(22) のような形式
+    # レビュー点数形式: 5.0(1) など
     if re.match(r"^\d+(?:\.\d+)?\s*\(.+\)\s*$", s):
         return False
 
-    # 日本語 or 英字が1つもない → 記号＋数字だけなので除外
+    # 数値や記号のみ (-22, 3.5 など) を除外
+    if re.match(r"^[\d\.\-＋\+マイナス\s]+$", s):
+        return False
+
+    # ひらがな・カタカナ・漢字・英字が少なくとも1つ
     if not re.search(rf"[{KANJI_KATA_HIRA}A-Za-z]", s):
         return False
 
@@ -325,26 +323,47 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
             continue
         phone = ph_raw
 
-        # 上方向に住所候補を探す
+        # --- 上方向に住所候補を探す ---
         addr_idx = None
         for j in range(i - 1, -1, -1):
             if is_address_like(col[j]):
                 addr_idx = j
                 break
+
+        # 住所候補が見つからない場合：電話行の1つ上から「営業時間系／数値だけ／クチコミ無し」を飛ばして探す
         if addr_idx is None:
+            for j in range(i - 1, -1, -1):
+                txt = normalize_text(col[j])
+                if not txt:
+                    continue
+                if is_hours_or_business_line(txt):
+                    continue
+                if re.match(r"^[\d\.\-＋\+マイナス\s]+$", txt):
+                    continue
+                if "クチコミはありません" in txt:
+                    continue
+                addr_idx = j
+                break
+
+        if addr_idx is None:
+            # どうしても見つからないときはスキップ
             continue
 
-        # 業種＋住所を分割
+        # 業種＋住所を右端の「·」で分割（なければ全部住所）
         ind_raw, addr_raw = split_industry_address(col[addr_idx])
         industry = extract_industry(ind_raw)
         address = clean_address(addr_raw)
 
-        # さらに上方向に企業名候補を探す（住所より上・一番近い候補）
+        # --- さらに上方向に企業名候補を探す ---
         company = ""
         for k in range(addr_idx - 1, -1, -1):
-            if is_company_candidate(col[k]):
-                company = normalize_text(col[k])
-                break
+            txt = normalize_text(col[k])
+            if not txt:
+                continue
+            if not is_company_candidate(txt):
+                continue
+            company = txt
+            break
         if not company:
             continue
 
@@ -375,7 +394,7 @@ highlight_partial = [
 ]
 
 # ===============================
-# 業種ノイズ除去（レビュー/評価など＋文字化け系）
+# 業種ノイズ除去（レビュー/評価など）
 # ===============================
 def clean_industry_noise(s: str) -> str:
     """
@@ -384,7 +403,7 @@ def clean_industry_noise(s: str) -> str:
     - Google のクチコミ
     - ○件のレビュー／口コミ
     などのノイズを除去する
-    ＋ 「□」などの文字化けっぽい記号も除去する
+    ＋ 最後に「·」「レビュ-なし」「空白だけ」は必ず消す
     """
     if not s:
         return ""
@@ -432,14 +451,12 @@ def clean_industry_noise(s: str) -> str:
     # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    # 文字化けっぽい四角記号の除去
-    if t:
-        t = re.sub(r"[□■◻◽◾▪▫⬜⬛]", "", t)
-
+    # ▼▼▼ ここが「必ず消す」部分 ▼▼▼
     # 中黒「·」や「レビュ-なし」を強制削除
     if t:
         for trash in ["·", "レビュ-なし"]:
             t = t.replace(trash, "")
+        # ついでに全角/半角スペースだけになった場合も空にする
         t = re.sub(r"\s+", " ", t).strip()
 
     return t if t else ""

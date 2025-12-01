@@ -128,7 +128,7 @@ def phone_digits_only(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
 
 # ===============================
-# 抽出プロファイル（既存3方式）
+# 抽出プロファイル（既存3方式＋拡張）
 # ===============================
 # 1) Google検索リスト（縦読み・電話上下）
 def extract_google_vertical(lines):
@@ -215,24 +215,51 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 # ★ 新プロファイル用のヘルパー（ヘッダーなし・業種＋住所同セル）
 # ===============================
 JP_LOC_PATTERN = re.compile(r"(丁目|番地?|号|市|区|町|村|郡|県|府|道)")
+KANJI_KATA_HIRA = r"\u4E00-\u9FFF\u30A0-\u30FF\u3040-\u309F"
+PHONE_INLINE_RE = re.compile(r"[0-9０-９]{2,4}[-－ー‐][0-9０-９]{2,4}[-－ー‐][0-9０-９]{3,4}")
 
 def is_address_like(text: str) -> bool:
-    """住所らしいかどうかのゆるい判定"""
+    """
+    住所らしいかどうかのゆるい判定
+    例:
+      「クリニック・医院・診療所・今之浦１丁目１－８」
+      「病院・診療所・中泉703」
+    """
     t = normalize_text(text)
     if not t:
         return False
+
+    # 営業時間行は住所扱いしない
+    if "営業時間" in t or "営業中" in t or "営業終了" in t:
+        return False
+
     has_digit = bool(re.search(r"\d", t))
     has_loc_word = bool(JP_LOC_PATTERN.search(t))
     has_block = bool(re.search(r"\d{1,3}[-－ー‐]\d{1,3}", t))
-    if has_digit and (has_loc_word or has_block):
+    ends_with_digit = bool(re.search(r"\d+$", t))
+    has_jp = bool(re.search(rf"[{KANJI_KATA_HIRA}]", t))
+
+    # 日本語＋数字が入っていないものは住所とみなさない
+    if not (has_digit and has_jp):
+        return False
+
+    # いずれかを満たせば住所扱い
+    if has_loc_word or has_block or ends_with_digit:
         return True
+
     return False
 
 def split_industry_address(text: str):
-    """セル内の右端の「·/・/･」で業種と住所に分割"""
+    """セル内の右端の「·/・/･」で業種と住所に分割し、住所の末尾に紛れた電話は削る"""
     t = normalize_text(text)
     if not t:
         return "", ""
+
+    # 住所側にくっついている電話を削る
+    m = PHONE_INLINE_RE.search(t)
+    if m:
+        t = t[:m.start()].rstrip()
+
     # 右から1つ目の区切りを探す
     last_pos = -1
     for ch in ["·", "・", "･"]:
@@ -242,47 +269,44 @@ def split_industry_address(text: str):
     if last_pos == -1:
         # 区切りがなければ全体を住所扱い
         return "", t.strip()
+
     left = t[:last_pos].strip()
-    right = t[last_pos + 1 :].strip()
+    right = t[last_pos + 1:].strip()
     if not right:
         # 右側が空なら住所扱いに倒す
         return "", left
     return left, right
 
-# 企業名探索用：住所の上からさかのぼり、数値・クチコミ・空白を飛ばした最初のセルを採用
-def is_noise_for_company(text: str) -> bool:
-    """
-    企業名候補としては無視したい行かどうか
-    - 空白
-    - 数字と +-. だけ（例: 3.5, -22, 4.1 など）
-    - 「クチコミはありません」を含む
-    """
+def is_company_candidate(text: str) -> bool:
+    """企業名として使えそうかどうか"""
     s = normalize_text(text)
     if not s:
-        return True
-    if "クチコミはありません" in s:
-        return True
-    # 数字と +-. と空白だけの行
-    if re.fullmatch(r"[0-9+\-\. ]+", s):
-        return True
-    return False
+        return False
 
-def find_company_above_address(col, addr_idx, max_steps: int = 10) -> str:
-    """
-    住所セルより上の行を最大 max_steps 行さかのぼり、
-    - 空白
-    - 数値のみ（3.5, -22 など）
-    - 「クチコミはありません」
-    を飛ばした最初のセルを企業名とみなす。
-    """
-    bottom = max(0, addr_idx - max_steps)
-    for k in range(addr_idx - 1, bottom - 1, -1):
-        txt = col[k]
-        if is_noise_for_company(txt):
-            continue
-        # ノイズでなければそのまま企業名として採用
-        return normalize_text(txt)
-    return ""
+    # 無視したいキーワード
+    noise_words = [
+        "ウェブサイト", "Web サイト", "web サイト",
+        "ルート・乗換", "ルート · 乗換", "ルート", "経路案内",
+        "オンラインで予約",
+        "共有",
+        "クチコミはありません",
+        "クチコミ", "口コミ", "レビュー", "件のレビュー",
+    ]
+    if any(w in s for w in noise_words):
+        return False
+
+    # 評価スコア単独 (2.8, -22 など)
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", s):
+        return False
+    # 4.4(22) のような形式
+    if re.match(r"^\d+(?:\.\d+)?\s*\(.+\)\s*$", s):
+        return False
+
+    # 日本語 or 英字が1つもない → 記号＋数字だけなので除外
+    if not re.search(rf"[{KANJI_KATA_HIRA}A-Za-z]", s):
+        return False
+
+    return True
 
 def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     """
@@ -292,7 +316,6 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     を抽出する。
     """
     df0 = df_like.fillna("")
-    # 1列目だけを見る前提
     col = df0.iloc[:, 0].astype(str).tolist()
     results = []
 
@@ -311,13 +334,17 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
         if addr_idx is None:
             continue
 
-        # 業種＋住所を右端の「·」で分割
+        # 業種＋住所を分割
         ind_raw, addr_raw = split_industry_address(col[addr_idx])
         industry = extract_industry(ind_raw)
         address = clean_address(addr_raw)
 
-        # 住所より上のセルから企業名を探索
-        company = find_company_above_address(col, addr_idx)
+        # さらに上方向に企業名候補を探す（住所より上・一番近い候補）
+        company = ""
+        for k in range(addr_idx - 1, -1, -1):
+            if is_company_candidate(col[k]):
+                company = normalize_text(col[k])
+                break
         if not company:
             continue
 
@@ -348,15 +375,16 @@ highlight_partial = [
 ]
 
 # ===============================
-# 業種ノイズ除去（レビュー/評価など）
+# 業種ノイズ除去（レビュー/評価など＋文字化け系）
 # ===============================
 def clean_industry_noise(s: str) -> str:
     """
-    業種カラムに紛れ込むノイズを除去
+    業種カラムに紛れ込む
     - レビュー情報（レビュー・なし・…）
     - Google のクチコミ
-    - ◯件のレビュー／口コミ
-    + 「·」「レビュ-なし」「□」「�」などのゴミも削除
+    - ○件のレビュー／口コミ
+    などのノイズを除去する
+    ＋ 「□」などの文字化けっぽい記号も除去する
     """
     if not s:
         return ""
@@ -367,6 +395,7 @@ def clean_industry_noise(s: str) -> str:
     # 先頭の評価スコア + 件数 例: '4.7(123)・', '4.7（123）・'
     t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*(?:件)?\s*[・･]?\s*", "", t)
 
+    # ---- 「レビュー・なし・○○」系をトークン単位で処理 ----
     def norm_token(x: str) -> str:
         return re.sub(r"\s+", "", x)
 
@@ -377,25 +406,39 @@ def clean_industry_noise(s: str) -> str:
         parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
         if not parts:
             return ""
+
+        # 全部ノイズなら空にする
         if all(norm_token(p) in noise_basic | noise_nashi for p in parts):
             return ""
+
         cleaned_parts = []
         for p in parts:
             pn = norm_token(p)
             if pn in noise_basic or pn in noise_nashi:
                 continue
             cleaned_parts.append(p)
+
         t = "・".join(cleaned_parts)
     else:
+        # 「Google のクチコミ」「口コミ」「クチコミ」などが途中にある場合
         t = re.sub(r"(?:^|[・･])\s*(Google\s*の?\s*クチコミ|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
+        # 「◯件のレビュー」「◯件の口コミ」など
         t = re.sub(r"[・･]?\s*\d+\s*件の?(レビュー|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
 
+    # 分割して空要素を削除
     parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
     t = "・".join(parts) if parts else ""
+
+    # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
+    # 文字化けっぽい四角記号の除去
     if t:
-        for trash in ["·", "レビュ-なし", "□", "�"]:
+        t = re.sub(r"[□■◻◽◾▪▫⬜⬛]", "", t)
+
+    # 中黒「·」や「レビュ-なし」を強制削除
+    if t:
+        for trash in ["·", "レビュ-なし"]:
             t = t.replace(trash, "")
         t = re.sub(r"\s+", " ", t).strip()
 
@@ -409,7 +452,6 @@ def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["企業名", "業種", "住所"]:
         df[c] = df[c].map(normalize_text)
     df["業種"] = df["業種"].map(clean_industry_noise)
-    df["業種"] = df["業種"].str.replace("□", "", regex=False).str.replace("�", "", regex=False)
     return df.fillna("")
 
 # ===============================
@@ -430,7 +472,7 @@ profile = st.selectbox(
     "抽出プロファイル",
     [
         "Google検索リスト（縦読み・電話上下型）",
-        "Google検索リスト（ヘッダーなし・業種＋住所同セル）",
+        "Google検索リスト（ヘッダーなし・業種＋住所同セル）",  # ★追加
         "シゴトアルワ検索リスト（縦積み）",
         "日本倉庫協会リスト（4列型）",
     ]
@@ -449,6 +491,7 @@ template_upload = None
 if template_source == "ここで template.xlsx をアップロードして使う":
     template_upload = st.file_uploader("template.xlsx をアップロード", type=["xlsx"], key="template_up")
 
+# ★ 複数ファイル対応：accept_multiple_files=True
 uploaded_files = st.file_uploader(
     "📤 整形対象のExcelファイルをアップロード（複数選択可）",
     type=["xlsx"],
@@ -490,6 +533,7 @@ if uploaded_files:
 
         # --- 抽出 ---
         if "入力マスター" in xl.sheet_names:
+            # template互換: 入力マスターから読み取り（電話は原文のまま）
             df_raw = pd.read_excel(
                 xl,
                 sheet_name="入力マスター",
@@ -532,13 +576,14 @@ if uploaded_files:
             removed_by_industry = before - len(df)
             st.warning(f"🏭 製造業フィルター適用：{removed_by_industry}件を除外しました")
 
-        # --- NG照合 ---
+        # --- NG照合（任意） ---
         removal_logs = []
         company_removed = 0
         phone_removed = 0
         dup_removed = 0
 
         if ng_names or ng_phones:
+            # 企業名（部分一致・相互包含）
             before = len(df)
             hit_idx = []
             for idx, row in df.iterrows():
@@ -557,6 +602,7 @@ if uploaded_files:
                 df = df.drop(index=hit_idx)
             company_removed = before - len(df)
 
+            # 電話番号digits一致
             before = len(df)
             mask = df["__digits"].isin(ng_phones)
             if mask.any():
@@ -570,7 +616,7 @@ if uploaded_files:
                 df = df[~mask]
             phone_removed = before - len(df)
 
-        # --- 重複（電話digits）除去 ---
+        # --- 重複（電話digits）除去（※このファイル内だけ） ---
         before = len(df)
         dup_mask = df["__digits"].ne("").astype(bool) & df["__digits"].duplicated(keep="first")
         if dup_mask.any():
@@ -587,7 +633,7 @@ if uploaded_files:
         # --- 空行の除去 ---
         df = df[~((df["企業名"] == "") & (df["業種"] == "") & (df["住所"] == "") & (df["電話番号"] == ""))].reset_index(drop=True)
 
-        # --- 画面表示 ---
+        # --- 画面表示（編集可・確定ボタンなし） ---
         st.success(f"✅ 整形完了：{len(df)}件の企業データを取得しました。")
         edited = st.data_editor(
             df[["企業名", "業種", "住所", "電話番号"]],
@@ -604,6 +650,7 @@ if uploaded_files:
             key=f"editable_preview_{file_index}",
         )
 
+        # 確定ボタンは廃止。edited をそのまま出力用に使う
         df_export = edited.copy()
 
         # --- サマリー＆削除ログDL ---
@@ -616,8 +663,8 @@ if uploaded_files:
             )
             if removal_logs:
                 log_df = pd.DataFrame(removal_logs)
-                csv_bytes = log_df.to_csv(index=False).encode("utf-8-sig")
                 st.dataframe(log_df.head(300), use_container_width=True)
+                csv_bytes = log_df.to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
                     "🧾 削除ログをCSVでダウンロード",
                     data=csv_bytes,
@@ -627,7 +674,7 @@ if uploaded_files:
                 )
 
         # ===============================
-        # template.xlsx へ書き込み
+        # template.xlsx へ書き込み（OS互換強化）
         # ===============================
         wb = None
         if template_upload is not None:
@@ -661,17 +708,18 @@ if uploaded_files:
 
         # 既存データ（2行目以降のB〜E）と塗りをクリア
         for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-            for cell in row[1:5]:  # B〜E
+            for cell in row[1:5]:  # B(1)〜E(4)
                 cell.value = None
                 cell.fill = PatternFill(fill_type=None)
 
+        # 物流ハイライト（業種に特定語が含まれる場合、C列を赤く）
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
         def is_logi(val: str) -> bool:
             v = (val or "").strip()
             return any(word in v for word in highlight_partial)
 
-        # B=企業名, C=業種, D=住所, E=電話
+        # データ書き込み（B=企業名, C=業種, D=住所, E=電話）
         for idx_row, row in df_export.iterrows():
             r = idx_row + 2
             sheet.cell(row=r, column=2, value=row["企業名"])
@@ -681,6 +729,7 @@ if uploaded_files:
             if industry_option == "物流業" and is_logi(row["業種"]):
                 sheet.cell(row=r, column=3).fill = red_fill
 
+        # ダウンロード（ファイルごとに別ボタン）
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)

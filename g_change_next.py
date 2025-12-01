@@ -327,55 +327,82 @@ def is_company_candidate(text: str) -> bool:
 
 def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     """
-    ヘッダーなし・業種＋住所が同じセル・電話番号はその下の行あたり
-    というパターンから
+    ヘッダーなし・業種＋住所が同じセル・口コミや評価が間に入る
+    Googleマップ系の縦長リストから
       企業名 / 業種 / 住所 / 電話番号
     を抽出する。
     """
     df0 = df_like.fillna("")
     col = df0.iloc[:, 0].astype(str).tolist()
+    n = len(col)
     results = []
 
+    # 電話番号がある行を順に見る
     for i, line in enumerate(col):
         ph_raw = pick_phone_token_raw(line)
         if not ph_raw:
             continue
-        phone = ph_raw
+        phone = ph_raw  # 原文保持
 
-        # --- 上方向に住所候補を探す ---
+        # ===============================
+        # 1) 住所候補行の探索（上方向 7 行以内）
+        # ===============================
         addr_idx = None
-        for j in range(i - 1, -1, -1):
-            if is_address_like(col[j]):
+        for j in range(i - 1, max(-1, i - 8), -1):
+            txt = normalize_text(col[j])
+            if not txt:
+                continue
+
+            # 明らかにノイズな行はスキップ
+            if "ルート・乗換" in txt or "ウェブサイト" in txt:
+                continue
+            if is_hours_or_business_line(txt):  # 営業時間・診療時間系
+                continue
+            if "クチコミはありません" in txt:
+                continue
+            # 評価点数や件数だけの行（2.8 / -72 など）
+            if re.match(r"^[\d\.\-＋\+マイナス\s]+$", txt):
+                continue
+
+            # 住所らしさの判定
+            # ① 通常の住所判定
+            if is_address_like(txt):
                 addr_idx = j
                 break
 
-        # 住所候補が見つからない場合：電話行の1つ上から「営業時間系／数値だけ／クチコミ無し」を飛ばして探す
-        if addr_idx is None:
-            for j in range(i - 1, -1, -1):
-                txt = normalize_text(col[j])
-                if not txt:
-                    continue
-                if is_hours_or_business_line(txt):
-                    continue
-                if re.match(r"^[\d\.\-＋\+マイナス\s]+$", txt):
-                    continue
-                if "クチコミはありません" in txt:
-                    continue
+            # ② 「市/町」が無くても、漢字＋数字を含む行なら住所候補とみなす
+            if re.search(r"\d", txt) and re.search(rf"[{KANJI_KATA_HIRA}]", txt):
                 addr_idx = j
                 break
 
+        # どうしても住所候補が見つからない場合はスキップ
         if addr_idx is None:
-            # どうしても見つからないときはスキップ
             continue
 
-        # 業種＋住所を右端の「·」で分割（なければ全部住所）
-        ind_raw, addr_raw = split_industry_address(col[addr_idx])
+        # ===============================
+        # 2) 業種＋住所の分割
+        # ===============================
+        raw_addr_line = col[addr_idx]
+        ind_raw, addr_raw = split_industry_address(raw_addr_line)
+
+        # 分割結果が微妙な場合の補正：
+        # 右側が住所っぽくない／左側が住所っぽい時は入れ替える
+        if addr_raw and not is_address_like(addr_raw) and is_address_like(ind_raw):
+            addr_raw, ind_raw = ind_raw, ""
+
+        # どちらも住所らしくない場合は、行全体を住所として扱う
+        if not addr_raw and not is_address_like(ind_raw):
+            addr_raw = raw_addr_line
+            ind_raw = ""
+
         industry = extract_industry(ind_raw)
         address = clean_address(addr_raw)
 
-        # --- さらに上方向に企業名候補を探す ---
+        # ===============================
+        # 3) 企業名候補の探索（住所行の上 7 行以内）
+        # ===============================
         company = ""
-        for k in range(addr_idx - 1, -1, -1):
+        for k in range(addr_idx - 1, max(-1, addr_idx - 8), -1):
             txt = normalize_text(col[k])
             if not txt:
                 continue
@@ -383,13 +410,16 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
                 continue
             company = txt
             break
+
         if not company:
+            # 企業名が見つからない場合はこの電話レコードは無視
             continue
 
         results.append([company, industry, address, phone])
 
     if not results:
         return pd.DataFrame(columns=["企業名", "業種", "住所", "電話番号"])
+
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
 

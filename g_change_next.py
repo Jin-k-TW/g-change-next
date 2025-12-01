@@ -216,36 +216,44 @@ def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
 # ===============================
 JP_LOC_PATTERN = re.compile(r"(丁目|番地?|号|市|区|町|村|郡|県|府|道)")
 
-def is_hours_or_business_line(text: str) -> bool:
-    """営業時間・診療時間系の行かどうか（住所候補からは除外）"""
-    t = normalize_text(text)
-    if not t:
-        return False
-    keywords = [
-        "営業時間", "営業中", "営業時間外", "営業開始",
-        "まもなく営業開始", "診療時間", "診察時間",
-    ]
-    return any(k in t for k in keywords)
-
 def is_address_like(text: str) -> bool:
-    """住所らしいかどうかのゆるい判定"""
+    """
+    住所らしいかどうかの判定（強化版）
+    - 「磐田市」「豊橋市中泉町」だけでも住所とみなす
+    - 「中泉町703」「病院・中泉町703」のような
+      町名＋数字パターンも住所とみなす
+    - 営業時間・診療時間の行は住所にしない
+    """
     t = normalize_text(text)
     if not t:
         return False
 
-    # ★ 営業時間系の行は住所扱いしない
+    # 営業時間系の行は住所扱いしない
     if is_hours_or_business_line(t):
         return False
 
     has_digit = bool(re.search(r"\d", t))
     has_loc_word = bool(JP_LOC_PATTERN.search(t))
-    has_block = bool(re.search(r"\d{1,3}[-－ー‐]\d{1,3}", t))
+    # 「1-11」「3-203」など番地っぽいブロック
+    has_block = bool(re.search(r"\d{1,4}[-－ー‐]\d{1,4}", t))
 
+    # 典型的な「◯丁目」「◯番地」「◯号」や「1-11」など
     if has_digit and (has_loc_word or has_block):
         return True
 
-    # 数字がなくても「○○市」「○○町」など住所語だけのケースを弱めに許可
+    # 数字がなくても「○○市」「○○町」など住所語だけでも住所とみなす
     if has_loc_word and not has_digit:
+        return True
+
+    # 「市/区/町/村/郡」の直後〜数文字の中に数字がくるパターン
+    # 例: 「中泉町703」「田戸町3丁目」
+    if re.search(r"[市区町村郡][^0-9]{0,4}\d{1,4}", t):
+        return True
+    if re.search(r"[町村郡]\d{1,4}", t):
+        return True
+
+    # 医療系などで多い「病院・中泉町703」のような形
+    if re.search(r"(病院|クリニック|医院)", t) and has_loc_word and has_digit:
         return True
 
     return False

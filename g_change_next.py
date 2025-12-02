@@ -653,7 +653,14 @@ if uploaded_files:
                 pat = "|".join(map(re.escape, all_ng_words))
                 df = df[~df["業種"].str.contains(pat, na=False)]
             removed_by_industry = before - len(df)
-            st.warning(f"🏭 製造業フィルター適用：{removed_by_industry}件を除外しました")
+
+        # --- 有限会社は全業種で除外したい場合 ---
+        yugen_pattern = r"(有限会社|\(有\)|（有）)"
+        before_yugen = len(df)
+        df = df[~df["企業名"].str.contains(yugen_pattern, na=False)]
+        removed_by_industry += before_yugen - len(df)
+
+        st.warning(f"🏭 フィルター適用：有限会社を含め {removed_by_industry}件を除外しました")
 
         # --- NG照合（任意） ---
         removal_logs = []

@@ -228,43 +228,24 @@ def is_hours_or_business_line(text: str) -> bool:
     return any(k in t for k in keywords)
 
 def is_address_like(text: str) -> bool:
-    """
-    住所らしいかどうかの判定（強化版）
-    - 「磐田市」「豊橋市中泉町」だけでも住所とみなす
-    - 「中泉町703」「病院・中泉町703」のような
-      町名＋数字パターンも住所とみなす
-    - 営業時間・診療時間の行は住所にしない
-    """
+    """住所らしいかどうかのゆるい判定"""
     t = normalize_text(text)
     if not t:
         return False
 
-    # 営業時間系の行は住所扱いしない
+    # ★ 営業時間系の行は住所扱いしない
     if is_hours_or_business_line(t):
         return False
 
     has_digit = bool(re.search(r"\d", t))
     has_loc_word = bool(JP_LOC_PATTERN.search(t))
-    # 「1-11」「3-203」など番地っぽいブロック
-    has_block = bool(re.search(r"\d{1,4}[-－ー‐]\d{1,4}", t))
+    has_block = bool(re.search(r"\d{1,3}[-－ー‐]\d{1,3}", t))
 
-    # 典型的な「◯丁目」「◯番地」「◯号」や「1-11」など
     if has_digit and (has_loc_word or has_block):
         return True
 
-    # 数字がなくても「○○市」「○○町」など住所語だけでも住所とみなす
+    # 数字がなくても「○○市」「○○町」など住所語だけのケースを弱めに許可
     if has_loc_word and not has_digit:
-        return True
-
-    # 「市/区/町/村/郡」の直後〜数文字の中に数字がくるパターン
-    # 例: 「中泉町703」「田戸町3丁目」
-    if re.search(r"[市区町村郡][^0-9]{0,4}\d{1,4}", t):
-        return True
-    if re.search(r"[町村郡]\d{1,4}", t):
-        return True
-
-    # 医療系などで多い「病院・中泉町703」のような形
-    if re.search(r"(病院|クリニック|医院)", t) and has_loc_word and has_digit:
         return True
 
     return False
@@ -327,82 +308,55 @@ def is_company_candidate(text: str) -> bool:
 
 def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     """
-    ヘッダーなし・業種＋住所が同じセル・口コミや評価が間に入る
-    Googleマップ系の縦長リストから
+    ヘッダーなし・業種＋住所が同じセル・電話番号はその下の行あたり
+    というパターンから
       企業名 / 業種 / 住所 / 電話番号
     を抽出する。
     """
     df0 = df_like.fillna("")
     col = df0.iloc[:, 0].astype(str).tolist()
-    n = len(col)
     results = []
 
-    # 電話番号がある行を順に見る
     for i, line in enumerate(col):
         ph_raw = pick_phone_token_raw(line)
         if not ph_raw:
             continue
-        phone = ph_raw  # 原文保持
+        phone = ph_raw
 
-        # ===============================
-        # 1) 住所候補行の探索（上方向 7 行以内）
-        # ===============================
+        # --- 上方向に住所候補を探す ---
         addr_idx = None
-        for j in range(i - 1, max(-1, i - 8), -1):
-            txt = normalize_text(col[j])
-            if not txt:
-                continue
-
-            # 明らかにノイズな行はスキップ
-            if "ルート・乗換" in txt or "ウェブサイト" in txt:
-                continue
-            if is_hours_or_business_line(txt):  # 営業時間・診療時間系
-                continue
-            if "クチコミはありません" in txt:
-                continue
-            # 評価点数や件数だけの行（2.8 / -72 など）
-            if re.match(r"^[\d\.\-＋\+マイナス\s]+$", txt):
-                continue
-
-            # 住所らしさの判定
-            # ① 通常の住所判定
-            if is_address_like(txt):
+        for j in range(i - 1, -1, -1):
+            if is_address_like(col[j]):
                 addr_idx = j
                 break
 
-            # ② 「市/町」が無くても、漢字＋数字を含む行なら住所候補とみなす
-            if re.search(r"\d", txt) and re.search(rf"[{KANJI_KATA_HIRA}]", txt):
-                addr_idx = j
-                break
-
-        # どうしても住所候補が見つからない場合はスキップ
+        # 住所候補が見つからない場合：電話行の1つ上から「営業時間系／数値だけ／クチコミ無し」を飛ばして探す
         if addr_idx is None:
+            for j in range(i - 1, -1, -1):
+                txt = normalize_text(col[j])
+                if not txt:
+                    continue
+                if is_hours_or_business_line(txt):
+                    continue
+                if re.match(r"^[\d\.\-＋\+マイナス\s]+$", txt):
+                    continue
+                if "クチコミはありません" in txt:
+                    continue
+                addr_idx = j
+                break
+
+        if addr_idx is None:
+            # どうしても見つからないときはスキップ
             continue
 
-        # ===============================
-        # 2) 業種＋住所の分割
-        # ===============================
-        raw_addr_line = col[addr_idx]
-        ind_raw, addr_raw = split_industry_address(raw_addr_line)
-
-        # 分割結果が微妙な場合の補正：
-        # 右側が住所っぽくない／左側が住所っぽい時は入れ替える
-        if addr_raw and not is_address_like(addr_raw) and is_address_like(ind_raw):
-            addr_raw, ind_raw = ind_raw, ""
-
-        # どちらも住所らしくない場合は、行全体を住所として扱う
-        if not addr_raw and not is_address_like(ind_raw):
-            addr_raw = raw_addr_line
-            ind_raw = ""
-
+        # 業種＋住所を右端の「·」で分割（なければ全部住所）
+        ind_raw, addr_raw = split_industry_address(col[addr_idx])
         industry = extract_industry(ind_raw)
         address = clean_address(addr_raw)
 
-        # ===============================
-        # 3) 企業名候補の探索（住所行の上 7 行以内）
-        # ===============================
+        # --- さらに上方向に企業名候補を探す ---
         company = ""
-        for k in range(addr_idx - 1, max(-1, addr_idx - 8), -1):
+        for k in range(addr_idx - 1, -1, -1):
             txt = normalize_text(col[k])
             if not txt:
                 continue
@@ -410,16 +364,13 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
                 continue
             company = txt
             break
-
         if not company:
-            # 企業名が見つからない場合はこの電話レコードは無視
             continue
 
         results.append([company, industry, address, phone])
 
     if not results:
         return pd.DataFrame(columns=["企業名", "業種", "住所", "電話番号"])
-
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
 
@@ -500,12 +451,10 @@ def clean_industry_noise(s: str) -> str:
     # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    # ▼▼▼ ここが「必ず消す」部分 ▼▼▼
     # 中黒「·」や「レビュ-なし」を強制削除
     if t:
         for trash in ["·", "レビュ-なし"]:
             t = t.replace(trash, "")
-        # ついでに全角/半角スペースだけになった場合も空にする
         t = re.sub(r"\s+", " ", t).strip()
 
     return t if t else ""
@@ -538,7 +487,7 @@ profile = st.selectbox(
     "抽出プロファイル",
     [
         "Google検索リスト（縦読み・電話上下型）",
-        "Google検索リスト（ヘッダーなし・業種＋住所同セル）",  # ★追加
+        "Google検索リスト（ヘッダーなし・業種＋住所同セル）",
         "シゴトアルワ検索リスト（縦積み）",
         "日本倉庫協会リスト（4列型）",
     ]
@@ -772,11 +721,10 @@ if uploaded_files:
 
         sheet = wb["入力マスター"]
 
-        # 既存データ（2行目以降のB〜E）と塗りをクリア
+        # 既存データ（2行目以降のB〜E）の「値のみ」クリア（スタイル・プルダウンは保持）
         for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
             for cell in row[1:5]:  # B(1)〜E(4)
                 cell.value = None
-                cell.fill = PatternFill(fill_type=None)
 
         # 物流ハイライト（業種に特定語が含まれる場合、C列を赤く）
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")

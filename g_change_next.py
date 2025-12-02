@@ -355,18 +355,38 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
         industry = extract_industry(ind_raw)
         address = clean_address(addr_raw)
 
-        # --- さらに上方向に企業名候補を探す ---
+        # --- 企業名の決定ロジック ---
         company = ""
-        for k in range(addr_idx - 1, -1, -1):
-            txt = normalize_text(col[k])
-            if not txt:
-                continue
-            if not is_company_candidate(txt):
-                continue
-            company = txt
-            break
+
+        # 1) 「クチコミはありません」パターンを優先
+        #    電話の1〜4行上のどこかにあれば、その1行上を企業名とみなす
+        for j in range(i - 1, max(-1, i - 5), -1):  # i-1, i-2, i-3, i-4
+            txt = normalize_text(col[j])
+            if "クチコミはありません" in txt:
+                cand_idx = j - 1
+                if cand_idx >= 0 and is_company_candidate(col[cand_idx]):
+                    company = normalize_text(col[cand_idx])
+                break  # 見つけたら終了
+
+        # 2) 通常パターン：電話の4行上を企業名とみなす
         if not company:
-            continue
+            cand_idx = i - 4
+            if cand_idx >= 0 and is_company_candidate(col[cand_idx]):
+                company = normalize_text(col[cand_idx])
+
+        # 3) フォールバック：住所行の上から企業候補を探索（従来ロジック）
+        if not company:
+            for k in range(addr_idx - 1, -1, -1):
+                txt = normalize_text(col[k])
+                if not txt:
+                    continue
+                if not is_company_candidate(txt):
+                    continue
+                company = txt
+                break
+
+        if not company:
+            continue  # 企業名が決められなければ、その電話番号はスキップ
 
         results.append([company, industry, address, phone])
 

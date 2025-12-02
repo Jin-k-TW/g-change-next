@@ -721,25 +721,42 @@ if uploaded_files:
 
         sheet = wb["入力マスター"]
 
-        # 既存データ（2行目以降のB〜E）の「値のみ」クリア（スタイル・プルダウンは保持）
-        for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
-            for cell in row[1:5]:  # B(1)〜E(4)
-                cell.value = None
+        # ===============================
+        # 既存データの「値だけ」クリア（B〜E列）
+        # ※ 書式・プルダウン・印刷範囲には触らない
+        # ===============================
+        start_row = 2
+        # 一応テンプレ側の使用行数と、今回の出力行数のどちらにも対応できるよう少し広めにクリア
+        max_existing_row = sheet.max_row
+        max_needed_row = start_row + len(df_export) + 50  # 余裕をもたせたバッファ
+        clear_until = max(max_existing_row, max_needed_row)
 
+        for r in range(start_row, clear_until + 1):
+            for c in range(2, 6):  # B〜E列
+                sheet.cell(row=r, column=c, value=None)
+                # ★fill は触らない：cell.fill = ... は一切しない
+
+        # ===============================
         # 物流ハイライト（業種に特定語が含まれる場合、C列を赤く）
+        # ※ ここだけは意図的に塗りを上書き
+        # ===============================
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
         def is_logi(val: str) -> bool:
             v = (val or "").strip()
             return any(word in v for word in highlight_partial)
 
+        # ===============================
         # データ書き込み（B=企業名, C=業種, D=住所, E=電話）
+        # ===============================
         for idx_row, row in df_export.iterrows():
-            r = idx_row + 2
+            r = idx_row + start_row
             sheet.cell(row=r, column=2, value=row["企業名"])
             sheet.cell(row=r, column=3, value=row["業種"])
             sheet.cell(row=r, column=4, value=row["住所"])
             sheet.cell(row=r, column=5, value=row["電話番号"])
+
+            # 物流業のみ、業種セルの塗りを上書き
             if industry_option == "物流業" and is_logi(row["業種"]):
                 sheet.cell(row=r, column=3).fill = red_fill
 

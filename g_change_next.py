@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation  # ★プルダウン用
+from openpyxl.worksheet.datavalidation import DataValidation
 
 # ===============================
 # 簡易ログイン（パスワード認証）
@@ -224,12 +224,12 @@ def is_hours_or_business_line(text: str) -> bool:
         return False
     keywords = [
         "営業時間", "営業中", "営業時間外", "営業開始",
-        "まもなく営業開始", "診療時間", "診察時間",
+        "まもなく営業開始", "診療時間", "診察時間", "24時間営業",
     ]
     return any(k in t for k in keywords)
 
 def is_address_like(text: str) -> bool:
-    """住所らしいかどうかのゆるい判定"""
+    """住所らしいかどうかのゆるい判定（Google縦型の旧ロジック用）"""
     t = normalize_text(text)
     if not t:
         return False
@@ -287,7 +287,7 @@ def is_company_candidate(text: str) -> bool:
         "ルート・乗換", "経路案内",
         "共有",
         "営業中", "営業時間", "営業時間外", "営業開始",
-        "クチコミはありません",
+        "まもなく営業開始", "クチコミはありません",
         "口コミ", "クチコミ", "レビュー", "件の",
     ]
     if any(w in s for w in noise_words):
@@ -307,15 +307,44 @@ def is_company_candidate(text: str) -> bool:
 
     return True
 
+def is_google_meta_line(text: str) -> bool:
+    """Google検索結果に出てくるメタ情報行かどうか（住所・業種候補からは除外）"""
+    t = normalize_text(text)
+    if not t:
+        return True  # 空行はメタ扱いで飛ばす
+
+    meta_keywords = [
+        "ルート・乗換", "経路案内",
+        "ウェブサイト", "Web サイト", "web サイト",
+        "オンラインで予約",
+        "共有",
+        "現在営業中", "営業時間", "営業時間外",
+        "営業開始", "まもなく営業開始", "24時間営業",
+        "クチコミはありません", "口コミ", "クチコミ", "レビュー",
+    ]
+    if any(k in t for k in meta_keywords):
+        return True
+
+    # 数値や記号だけの行（評価点、-22 など）
+    if re.match(r"^[\d\.\-＋\+マイナス\s]+$", t):
+        return True
+
+    return False
+
 def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     """
-    ヘッダーなし・業種＋住所が同じセル・電話番号はその下の行あたり
-    というパターンから
+    Google検索結果（縦並び・ヘッダーなし・
+    「業種＋住所」が同じセルに入っているパターン）から
+
       企業名 / 業種 / 住所 / 電話番号
+
     を抽出する。
+    企業名は「電話から3〜4行上」のルールを優先しつつ、
+    その間の行から業種＋住所のセルを拾う。
     """
     df0 = df_like.fillna("")
     col = df0.iloc[:, 0].astype(str).tolist()
+    n = len(col)
     results = []
 
     for i, line in enumerate(col):
@@ -324,74 +353,86 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
             continue
         phone = ph_raw
 
-        # --- 上方向に住所候補を探す ---
-        addr_idx = None
-        for j in range(i - 1, -1, -1):
-            if is_address_like(col[j]):
-                addr_idx = j
-                break
+        # --------------------------
+        # 1) 企業名の行を決める
+        # --------------------------
+        company_idx = None
 
-        # 住所候補が見つからない場合：電話行の1つ上から「営業時間系／数値だけ／クチコミ無し」を飛ばして探す
-        if addr_idx is None:
+        # まず Jin さんルールで候補を決める
+        txt_m2 = normalize_text(col[i - 2]) if i - 2 >= 0 else ""
+        if i - 3 >= 0 and "クチコミはありません" in txt_m2:
+            # 電話の2行上に「クチコミはありません」→ 3行上が企業名候補
+            company_idx = i - 3
+        elif i - 4 >= 0:
+            # それ以外は基本4行上
+            company_idx = i - 4
+
+        # 候補が会社名として微妙なら、上方向にスキャンして会社名らしい行を探す
+        if company_idx is not None:
+            if not is_company_candidate(col[company_idx]):
+                company_idx = None
+
+        if company_idx is None:
+            for k in range(i - 1, -1, -1):
+                if is_company_candidate(col[k]):
+                    company_idx = k
+                    break
+
+        if company_idx is None:
+            # 企業名がどうしても見つからない場合はこの電話はスキップ
+            continue
+
+        company = normalize_text(col[company_idx])
+
+        # --------------------------
+        # 2) 業種＋住所セルを探す
+        # --------------------------
+        indaddr_idx = None
+        # 電話の1行上から企業名の1行下までを逆順に見て、
+        # メタ行を飛ばしながら最初に見つかった行を採用
+        for j in range(i - 1, company_idx, -1):
+            txt = normalize_text(col[j])
+            if not txt:
+                continue
+            if is_google_meta_line(txt):
+                continue
+            indaddr_idx = j
+            break
+
+        # どうしても見つからない場合の保険として、
+        # 電話の1行上から上方向にメタ以外の行を探す
+        if indaddr_idx is None:
             for j in range(i - 1, -1, -1):
                 txt = normalize_text(col[j])
                 if not txt:
                     continue
-                if is_hours_or_business_line(txt):
+                if is_google_meta_line(txt):
                     continue
-                if re.match(r"^[\d\.\-＋\+マイナス\s]+$", txt):
-                    continue
-                if "クチコミはありません" in txt:
-                    continue
-                addr_idx = j
+                indaddr_idx = j
                 break
 
-        if addr_idx is None:
-            # どうしても見つからないときはスキップ
-            continue
+        industry = ""
+        address = ""
 
-        # 業種＋住所を右端の「·」で分割（なければ全部住所）
-        ind_raw, addr_raw = split_industry_address(col[addr_idx])
-        industry = extract_industry(ind_raw)
-        address = clean_address(addr_raw)
+        if indaddr_idx is not None:
+            ind_raw, addr_raw = split_industry_address(col[indaddr_idx])
 
-        # --- 企業名の決定ロジック ---
-        company = ""
+            if addr_raw:
+                # 「業種・住所」のように分割できたケース
+                industry = extract_industry(ind_raw)
+                address = clean_address(addr_raw)
+            else:
+                # 区切り記号が無い → 全体を住所扱い
+                address = clean_address(col[indaddr_idx])
 
-        # 1) 「クチコミはありません」パターンを優先
-        #    電話の1〜4行上のどこかにあれば、その1行上を企業名とみなす
-        for j in range(i - 1, max(-1, i - 5), -1):  # i-1, i-2, i-3, i-4
-            txt = normalize_text(col[j])
-            if "クチコミはありません" in txt:
-                cand_idx = j - 1
-                if cand_idx >= 0 and is_company_candidate(col[cand_idx]):
-                    company = normalize_text(col[cand_idx])
-                break  # 見つけたら終了
-
-        # 2) 通常パターン：電話の4行上を企業名とみなす
-        if not company:
-            cand_idx = i - 4
-            if cand_idx >= 0 and is_company_candidate(col[cand_idx]):
-                company = normalize_text(col[cand_idx])
-
-        # 3) フォールバック：住所行の上から企業候補を探索（従来ロジック）
-        if not company:
-            for k in range(addr_idx - 1, -1, -1):
-                txt = normalize_text(col[k])
-                if not txt:
-                    continue
-                if not is_company_candidate(txt):
-                    continue
-                company = txt
-                break
-
-        if not company:
-            continue  # 企業名が決められなければ、その電話番号はスキップ
-
+        # --------------------------
+        # 3) 結果として追加
+        # --------------------------
         results.append([company, industry, address, phone])
 
     if not results:
         return pd.DataFrame(columns=["企業名", "業種", "住所", "電話番号"])
+
     return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
 
@@ -742,10 +783,10 @@ if uploaded_files:
             st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
             st.stop()
 
-        sheet = wb["入力マスター"]
+        sheet_master = wb["入力マスター"]
 
         # 既存データ（2行目以降のB〜E）と塗りをクリア
-        for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+        for row in sheet_master.iter_rows(min_row=2, max_row=sheet_master.max_row):
             for cell in row[1:5]:  # B(1)〜E(4)
                 cell.value = None
                 cell.fill = PatternFill(fill_type=None)
@@ -760,55 +801,44 @@ if uploaded_files:
         # データ書き込み（B=企業名, C=業種, D=住所, E=電話）
         for idx_row, row in df_export.iterrows():
             r = idx_row + 2
-            sheet.cell(row=r, column=2, value=row["企業名"])
-            sheet.cell(row=r, column=3, value=row["業種"])
-            sheet.cell(row=r, column=4, value=row["住所"])
-            sheet.cell(row=r, column=5, value=row["電話番号"])
+            sheet_master.cell(row=r, column=2, value=row["企業名"])
+            sheet_master.cell(row=r, column=3, value=row["業種"])
+            sheet_master.cell(row=r, column=4, value=row["住所"])
+            sheet_master.cell(row=r, column=5, value=row["電話番号"])
             if industry_option == "物流業" and is_logi(row["業種"]):
-                sheet.cell(row=r, column=3).fill = red_fill
+                sheet_master.cell(row=r, column=3).fill = red_fill
 
-        # ===== ここから：開拓先リストのH列にプルダウンを設定 =====
+        # ===============================
+        # 開拓先リストシートのプルダウン＆印刷範囲設定
+        # ===============================
         if "開拓先リスト" in wb.sheetnames:
-            target_sheet = wb["開拓先リスト"]
+            sheet_k = wb["開拓先リスト"]
 
-            # プルダウンの候補
-            dropdown_items = [
-                "-",
-                "アポ",
-                "見込み",
-                "断り",
-                "留守",
-                "担当者不在",
-                "不使用",
-                "削除依頼",
-            ]
+            # プルダウン（データ検証）: H列の H3, H9, H15, ... に設定
+            try:
+                dv = DataValidation(
+                    type="list",
+                    formula1='"-,アポ,見込み,断り,留守,担当者不在,不使用,削除依頼"',
+                    allow_blank=True,
+                )
+                sheet_k.add_data_validation(dv)
 
-            # H列に既に付いているデータ検証を削除
-            to_remove = []
-            for dv in list(target_sheet.data_validations.dataValidation):
-                if "H" in str(dv.sqref):
-                    to_remove.append(dv)
-            for dv in to_remove:
-                target_sheet.data_validations.dataValidation.remove(dv)
+                max_row_k = sheet_k.max_row or 200
+                row = 3
+                while row <= max_row_k:
+                    cell_ref = f"H{row}"
+                    dv.add(sheet_k[cell_ref])
+                    row += 6
+            except Exception:
+                # DataValidation がうまく行かない場合は何もしない（エラーで止めない）
+                pass
 
-            # 新しいデータ検証（リスト）を追加
-            dv = DataValidation(
-                type="list",
-                formula1='"' + ",".join(dropdown_items) + '"',
-                allow_blank=True,
-            )
-            target_sheet.add_data_validation(dv)
-
-            # H3, H9, H15, ...（6行おき）に適用
-            max_row = target_sheet.max_row
-            for row_idx in range(3, max_row + 1, 6):
-                cell_addr = f"H{row_idx}"
-                dv.add(cell_addr)
-
-             # ★ 印刷範囲を A〜L の全行に設定
-            target_sheet.print_area = f"A1:L{max_row}"
-            
-        # ===== ここまで：プルダウン設定 =====
+            # 印刷範囲を A〜L 全行に設定
+            try:
+                max_row_k = sheet_k.max_row or 200
+                sheet_k.print_area = f"A1:L{max_row_k}"
+            except Exception:
+                pass
 
         # ダウンロード（ファイルごとに別ボタン）
         output = io.BytesIO()

@@ -784,6 +784,10 @@ if uploaded_files:
             for row_idx in range(3, max_row + 1, 6):
                 cell_addr = f"H{row_idx}"
                 dv.add(cell_addr)
+
+             # ★ 印刷範囲を A〜L の全行に設定
+            target_sheet.print_area = f"A1:L{max_row}"
+            
         # ===== ここまで：プルダウン設定 =====
 
         # ダウンロード（ファイルごとに別ボタン）

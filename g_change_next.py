@@ -436,13 +436,14 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
 
 
 # ===============================
-# KEN_ALL 読み込み（プロジェクト直下）
+# KEN_ALL 読み込み＆市区町村辞書（キャッシュ付き）
 # ===============================
+@st.cache_data
 def load_ken_all_local():
     """
-    プロジェクト直下の KEN_ALL.xlsx または KEN_ALL.CSV を探して読み込む。
+    プロジェクト直下の KEN_ALL.xlsx / KEN_ALL.csv を読み込む。
     G列=都道府県, H列=市区町村, I列=町域名 という前提。
-    見つからなければ None を返す。
+    読み込みと正規化はセッション中に1回だけ。
     """
     base = Path(__file__).resolve().parent
     for fname in ["KEN_ALL.xlsx", "KEN_ALL.XLSX", "KEN_ALL.csv", "KEN_ALL.CSV"]:
@@ -453,46 +454,44 @@ def load_ken_all_local():
                     df = pd.read_excel(path, engine="openpyxl").fillna("")
                 else:
                     df = pd.read_csv(path, header=None, encoding="cp932").fillna("")
+                # ここで一度だけ正規化して保持しておく
+                df["__pref_norm"] = df.iloc[:, 6].map(normalize_text)
+                df["__city_norm"] = df.iloc[:, 7].map(normalize_text)
+                df["__town_norm"] = df.iloc[:, 8].map(normalize_text)
                 return df
             except Exception as e:
                 st.warning(f"KEN_ALL 読み込みでエラーが発生しました: {e}")
                 return None
     return None
 
-KEN_ALL_DF = load_ken_all_local()
 
-def build_town_tokens_from_ken_all(ken_df, pref_name: str, city_name: str) -> set:
+@st.cache_data
+def build_city_town_dict():
     """
-    KEN_ALL から、指定した「都道府県＋市区町村」に属する町域名（I列）のセットを作る。
-    G列: 都道府県名, H列: 市区町村名, I列: 町域名
+    (都道府県, 市区町村) -> 町域セット への辞書を作る。
+    これもセッション中に1回だけ。
     """
-    if ken_df is None or not pref_name or not city_name:
-        return set()
+    ken_df = load_ken_all_local()
+    if ken_df is None:
+        return {}
 
-    pref = normalize_text(pref_name)
-    city = normalize_text(city_name)
-
-    # G列=6, H列=7, I列=8 （0始まり）
-    g = ken_df.iloc[:, 6].map(normalize_text)
-    h = ken_df.iloc[:, 7].map(normalize_text)
-    i = ken_df.iloc[:, 8].map(normalize_text)
-
-    mask = (g == pref) & (h == city)
-    sub = ken_df[mask]
-
-    if sub.empty:
-        return set()
-
-    towns = set()
-    for val in i[mask]:
-        t = normalize_text(val)
-        if not t:
+    city_town = {}
+    for pref, city, town in zip(
+        ken_df["__pref_norm"],
+        ken_df["__city_norm"],
+        ken_df["__town_norm"],
+    ):
+        if not pref or not city or not town:
             continue
-        if "以下に掲載がない場合" in t:
+        if "以下に掲載がない場合" in town:
             continue
-        towns.add(t)
+        key = (pref, city)
+        if key not in city_town:
+            city_town[key] = set()
+        city_town[key].add(town)
 
-    return towns
+    # キャッシュに載せやすいようにフリーズしておく
+    return {k: frozenset(v) for k, v in city_town.items()}
 
 def address_matches_city_towns(address: str, city_name: str, town_tokens: set) -> bool:
     """
@@ -626,8 +625,11 @@ target_pref = ""
 target_city = ""
 town_tokens = set()
 
-if KEN_ALL_DF is None:
-    st.info("KEN_ALL.xlsx / KEN_ALL.CSV がプロジェクト直下に見つからないため、市区町村フィルタは現在使用できません。")
+# 辞書を一度だけ構築（キャッシュされる）
+city_town_dict = build_city_town_dict()
+
+if not city_town_dict:
+    st.info("KEN_ALL.xlsx / KEN_ALL.CSV がプロジェクト直下に見つからないか、読込に失敗したため、市区町村フィルタは現在使用できません。")
 else:
     use_city_filter = st.checkbox(
         "市区町村フィルタを使う（KEN_ALL を参照して、別地域の住所を除外）",
@@ -639,7 +641,8 @@ else:
         target_city = st.text_input("市区町村名（例：水戸市）").strip()
 
         if target_pref and target_city:
-            town_tokens = build_town_tokens_from_ken_all(KEN_ALL_DF, target_pref, target_city)
+            key = (normalize_text(target_pref), normalize_text(target_city))
+            town_tokens = set(city_town_dict.get(key, []))
             if not town_tokens:
                 st.warning(f"KEN_ALL から『{target_pref} {target_city}』に該当する町域が見つかりませんでした。市区町村フィルタは一旦無効として処理します。")
                 use_city_filter = False

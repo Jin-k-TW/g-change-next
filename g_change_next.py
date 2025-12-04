@@ -655,11 +655,41 @@ template_source = st.radio(
     ("プロジェクト内の template.xlsx を使う（従来）", "ここで template.xlsx をアップロードして使う"),
     index=0
 )
+
+# ユーザーがアップロードした template.xlsx（必要な場合だけ）
 template_upload = None
 if template_source == "ここで template.xlsx をアップロードして使う":
     template_upload = st.file_uploader("template.xlsx をアップロード", type=["xlsx"], key="template_up")
 
-# ★ 複数ファイル対応：accept_multiple_files=True
+# --- 🔥 ここで template.xlsx を一度だけバイトとして読み込んで共有する ---
+template_bytes = None
+
+if template_source == "ここで template.xlsx をアップロードして使う":
+    # アップロード方式：ファイルが選ばれていればその内容を読む
+    if template_upload is not None:
+        # ※ .read() は一度きりなので、ここで読み切って bytes にして保持する
+        template_bytes = template_upload.read()
+else:
+    # プロジェクト直下から template.xlsx を読む
+    app_dir = Path(__file__).resolve().parent
+    template_path = app_dir / "template.xlsx"
+    if not template_path.exists():
+        st.error(
+            f"❌ template.xlsx が見つかりませんでした（期待パス: {template_path}）。"
+            "『ここで template.xlsx をアップロードして使う』を選ぶか、"
+            "ファイルをプロジェクト直下に配置してください。"
+        )
+        st.stop()
+    # バイナリで読み込んで、bytes を保持する
+    with open(template_path, "rb") as f:
+        template_bytes = f.read()
+
+# どちらのパターンでも template_bytes が None ならエラー
+if template_bytes is None:
+    st.error("❌ template.xlsx を読み込めませんでした。設定を確認してください。")
+    st.stop()
+
+# ★ 複数ファイル対応：accept_multiple_files=True（ここは従来どおり）
 uploaded_files = st.file_uploader(
     "📤 整形対象のExcelファイルをアップロード（複数選択可）",
     type=["xlsx"],
@@ -860,31 +890,11 @@ if uploaded_files:
                 )
 
         # ===============================
-        # template.xlsx へ書き込み（OS互換強化）
+        # template.xlsx へ書き込み（高速版）
         # ===============================
-        wb = None
-        if template_upload is not None:
-            try:
-                buf = io.BytesIO(template_upload.read())
-                wb = load_workbook(buf)
-            except Exception as e:
-                st.error(f"❌ アップロードした template.xlsx の読み込みに失敗しました: {e}")
-                st.stop()
-        else:
-            app_dir = Path(__file__).resolve().parent
-            template_path = app_dir / "template.xlsx"
-            if not template_path.exists():
-                st.error(
-                    f"❌ template.xlsx が見つかりませんでした（期待パス: {template_path}）。"
-                    "『ここで template.xlsx をアップロードして使う』を選ぶか、"
-                    "ファイルをプロジェクト直下に配置してください。"
-                )
-                st.stop()
-            try:
-                wb = load_workbook(template_path)
-            except Exception as e:
-                st.error(f"❌ template.xlsx の読み込みに失敗しました: {e}")
-                st.stop()
+
+        # ループのたびに「テンプレのバイト」から新しい Workbook を作る
+        wb = load_workbook(io.BytesIO(template_bytes))
 
         if "入力マスター" not in wb.sheetnames:
             st.error("❌ template.xlsx に『入力マスター』というシートが存在しません。")
@@ -892,11 +902,10 @@ if uploaded_files:
 
         sheet_master = wb["入力マスター"]
 
-        # 既存データ（2行目以降のB〜E）と塗りをクリア
-        for row in sheet_master.iter_rows(min_row=2, max_row=sheet_master.max_row):
-            for cell in row[1:5]:  # B(1)〜E(4)
-                cell.value = None
-                cell.fill = PatternFill(fill_type=None)
+        # ※ここでは「既存データを全クリアする処理」は不要
+        #   毎回、まっさらな template.xlsx から作り直している前提。
+        #   もしテンプレにサンプル行が入っている場合は、
+        #   そのサンプルを消した「空テンプレ」を1つ作っておくとさらに速くなります。
 
         # 物流ハイライト（業種に特定語が含まれる場合、C列を赤く）
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")

@@ -59,7 +59,7 @@ st.set_page_config(page_title="G-Change Next", layout="wide")
 if not check_password():
     st.stop()
 
-st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.3 複数ファイル対応＋市区町村フィルタ対応版）")
+st.title("🚗 G-Change Next｜企業情報整形＆NG除外ツール（Ver6.4 市区町村フィルタ対応）")
 
 # ===============================
 # テキスト正規化
@@ -344,7 +344,6 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
     """
     df0 = df_like.fillna("")
     col = df0.iloc[:, 0].astype(str).tolist()
-    n = len(col)
     results = []
 
     for i, line in enumerate(col):
@@ -358,7 +357,7 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
         # --------------------------
         company_idx = None
 
-        # まずルールで候補を決める
+        # まず Jin さんルールで候補を決める
         txt_m2 = normalize_text(col[i - 2]) if i - 2 >= 0 else ""
         if i - 3 >= 0 and "クチコミはありません" in txt_m2:
             # 電話の2行上に「クチコミはありません」→ 3行上が企業名候補
@@ -437,78 +436,84 @@ def extract_google_free_vertical(df_like: pd.DataFrame) -> pd.DataFrame:
 
 
 # ===============================
-# KEN_ALL 読み込み＆市区町村フィルタ用ヘルパー
+# KEN_ALL 読み込み（プロジェクト直下）
 # ===============================
-@st.cache_data(show_spinner=False)
-def load_ken_all():
+def load_ken_all_local():
     """
-    プロジェクト直下の KEN_ALL.xlsx または KEN_ALL.CSV を読み込む
-    G列: 都道府県名, H列: 市区町村名, I列以降: 町域など を想定
+    プロジェクト直下の KEN_ALL.xlsx または KEN_ALL.CSV を探して読み込む。
+    G列=都道府県, H列=市区町村, I列=町域名 という前提。
+    見つからなければ None を返す。
     """
     base = Path(__file__).resolve().parent
-    xlsx_path = base / "KEN_ALL.xlsx"
-    csv_path = base / "KEN_ALL.CSV"
-
-    if xlsx_path.exists():
-        return pd.read_excel(xlsx_path, header=None, dtype=str)
-    if csv_path.exists():
-        # 日本郵便公式CSV想定
-        return pd.read_csv(csv_path, header=None, dtype=str, encoding="cp932")
+    for fname in ["KEN_ALL.xlsx", "KEN_ALL.XLSX", "KEN_ALL.csv", "KEN_ALL.CSV"]:
+        path = base / fname
+        if path.exists():
+            try:
+                if fname.lower().endswith("xlsx"):
+                    df = pd.read_excel(path, engine="openpyxl").fillna("")
+                else:
+                    df = pd.read_csv(path, header=None, encoding="cp932").fillna("")
+                return df
+            except Exception as e:
+                st.warning(f"KEN_ALL 読み込みでエラーが発生しました: {e}")
+                return None
     return None
 
-def build_town_tokens(ken_df: pd.DataFrame, pref_name: str, city_name: str):
+KEN_ALL_DF = load_ken_all_local()
+
+def build_town_tokens_from_ken_all(ken_df, pref_name: str, city_name: str) -> set:
     """
-    KEN_ALL から指定の都道府県＋市区町村に該当する町域候補の集合を作る
-    G列(6): 都道府県名, H列(7): 市区町村名, I列以降(8〜): 町域など
+    KEN_ALL から、指定した「都道府県＋市区町村」に属する町域名（I列）のセットを作る。
+    G列: 都道府県名, H列: 市区町村名, I列: 町域名
     """
-    if ken_df is None:
-        return set(), 0
+    if ken_df is None or not pref_name or not city_name:
+        return set()
 
-    pref_col = ken_df.iloc[:, 6].map(normalize_text)
-    city_col = ken_df.iloc[:, 7].map(normalize_text)
+    pref = normalize_text(pref_name)
+    city = normalize_text(city_name)
 
-    mask = (pref_col == pref_name) & (city_col == city_name)
-    hit = int(mask.sum())
-    if hit == 0:
-        return set(), 0
+    # G列=6, H列=7, I列=8 （0始まり）
+    g = ken_df.iloc[:, 6].map(normalize_text)
+    h = ken_df.iloc[:, 7].map(normalize_text)
+    i = ken_df.iloc[:, 8].map(normalize_text)
 
-    tokens = set()
-    # I列以降をすべて町域候補として集める
-    for col_idx in range(8, ken_df.shape[1]):
-        series = ken_df.loc[mask, col_idx].dropna().astype(str)
-        for v in series:
-            v = normalize_text(v)
-            if v:
-                tokens.add(v)
+    mask = (g == pref) & (h == city)
+    sub = ken_df[mask]
 
-    return tokens, hit
+    if sub.empty:
+        return set()
 
-def address_in_target_city(address: str, pref_name: str, city_name: str, town_tokens: set) -> bool:
+    towns = set()
+    for val in i[mask]:
+        t = normalize_text(val)
+        if not t:
+            continue
+        if "以下に掲載がない場合" in t:
+            continue
+        towns.add(t)
+
+    return towns
+
+def address_matches_city_towns(address: str, city_name: str, town_tokens: set) -> bool:
     """
-    住所が指定の都道府県＋市区町村に属していそうか判定
-    ・都道府県名と市区町村名が両方含まれていることを必須条件に
-    ・さらに町域トークンのどれかが含まれていれば「より強く」肯定
+    住所が、指定市区町村の町域セットにマッチするかどうか。
+    ・町名(I列)のどれかが住所に含まれていれば True
+    ・町名にヒットしなくても、市区町村名自体が住所に含まれていれば True
+    それ以外は False（＝別地域とみなして除外）
     """
     t = normalize_text(address)
     if not t:
         return False
 
-    # 都道府県＋市区町村が両方含まれていなければ除外
-    if pref_name not in t or city_name not in t:
-        return False
-
-    # 町域トークンがなければ、ここまででOK
-    if not town_tokens:
-        return True
-
-    # どれか1つでも町域名が含まれていればOK
     for token in town_tokens:
         if token and token in t:
             return True
 
-    # 都道府県＋市区町村だけで、町域名がうまく引っかからなかった場合
-    # （なるべく残したいので True にしておく）
-    return True
+    city = normalize_text(city_name)
+    if city and city in t:
+        return True
+
+    return False
 
 
 # ===============================
@@ -534,19 +539,14 @@ highlight_partial = [
 # 業種ノイズ除去（レビュー/評価など）
 # ===============================
 def clean_industry_noise(s: str) -> str:
-    """
-    業種カラムに紛れ込むノイズを除去
-    """
     if not s:
         return ""
     t = str(s)
-    # 空白をゆるく正規化
     t = re.sub(r"\s+", " ", t).strip()
 
-    # 先頭の評価スコア + 件数 例: '4.7(123)・'
+    # 先頭の評価スコア + 件数
     t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*(?:件)?\s*[・･]?\s*", "", t)
 
-    # ---- 「レビュー・なし・○○」系をトークン単位で処理 ----
     def norm_token(x: str) -> str:
         return re.sub(r"\s+", "", x)
 
@@ -557,33 +557,23 @@ def clean_industry_noise(s: str) -> str:
         parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
         if not parts:
             return ""
-
-        # 全部ノイズなら空にする
         if all(norm_token(p) in noise_basic | noise_nashi for p in parts):
             return ""
-
         cleaned_parts = []
         for p in parts:
             pn = norm_token(p)
             if pn in noise_basic or pn in noise_nashi:
                 continue
             cleaned_parts.append(p)
-
         t = "・".join(cleaned_parts)
     else:
-        # 「Google のクチコミ」「口コミ」「クチコミ」などが途中にある場合
         t = re.sub(r"(?:^|[・･])\s*(Google\s*の?\s*クチコミ|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
-        # 「◯件のレビュー」「◯件の口コミ」など
         t = re.sub(r"[・･]?\s*\d+\s*件の?(レビュー|口コミ|クチコミ)\s*(?=[・･]|$)", "", t)
 
-    # 分割して空要素を削除
     parts = [p.strip() for p in re.split(r"[・･]", t) if p.strip()]
     t = "・".join(parts) if parts else ""
-
-    # 余計な区切りや空白を整形
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    # 中黒「·」や「レビュ-なし」を強制削除
     if t:
         for trash in ["·", "レビュ-なし"]:
             t = t.replace(trash, "")
@@ -602,7 +592,7 @@ def clean_dataframe_except_phone(df: pd.DataFrame) -> pd.DataFrame:
     return df.fillna("")
 
 # ===============================
-# UI（NGリスト選択・抽出方式・業種カテゴリ・市区町村・テンプレート入力）
+# UI（NGリスト選択・抽出方式・業種カテゴリ・市区町村フィルタ・テンプレート入力）
 # ===============================
 st.markdown("### 🛡️ 使用するNGリストを選択")
 nglist_files = [f for f in os.listdir() if f.endswith(".xlsx") and "NGリスト" in f]
@@ -628,13 +618,33 @@ profile = st.selectbox(
 st.markdown("### 🏭 業種カテゴリを選択")
 industry_option = st.radio("どの業種カテゴリーに該当しますか？", ("製造業", "物流業", "その他"))
 
-# ---- 市区町村フィルタ ----
+# --- 市区町村フィルタ（KEN_ALL 使用） ---
 st.markdown("### 📍 抽出対象の市区町村フィルタ（任意）")
-pref_input = st.text_input("都道府県名（例：茨城県、大阪府など）", value="")
-city_input = st.text_input("市区町村名（例：水戸市、古賀市など）", value="")
 
-if (pref_input and not city_input) or (city_input and not pref_input):
-    st.warning("市区町村フィルタを使う場合は、都道府県名と市区町村名の両方を入力してください。どちらも空欄ならフィルタは無効になります。")
+use_city_filter = False
+target_pref = ""
+target_city = ""
+town_tokens = set()
+
+if KEN_ALL_DF is None:
+    st.info("KEN_ALL.xlsx / KEN_ALL.CSV がプロジェクト直下に見つからないため、市区町村フィルタは現在使用できません。")
+else:
+    use_city_filter = st.checkbox(
+        "市区町村フィルタを使う（KEN_ALL を参照して、別地域の住所を除外）",
+        value=False,
+        help="チェックすると、都道府県＋市区町村を指定し、その市に属さない町名の住所はリストから除外します。"
+    )
+    if use_city_filter:
+        target_pref = st.text_input("都道府県名（例：茨城県）").strip()
+        target_city = st.text_input("市区町村名（例：水戸市）").strip()
+
+        if target_pref and target_city:
+            town_tokens = build_town_tokens_from_ken_all(KEN_ALL_DF, target_pref, target_city)
+            if not town_tokens:
+                st.warning(f"KEN_ALL から『{target_pref} {target_city}』に該当する町域が見つかりませんでした。市区町村フィルタは一旦無効として処理します。")
+                use_city_filter = False
+            else:
+                st.success(f"市区町村フィルタ対象：{target_pref}{target_city}（町域 {len(town_tokens)}件）")
 
 st.markdown("### 🧩 テンプレートの取得方法（OS互換強化）")
 template_source = st.radio(
@@ -679,22 +689,6 @@ if uploaded_files and selected_nglist != "なし":
 # メイン処理（★ファイルごとに独立して処理）
 # ===============================
 if uploaded_files:
-    # 市区町村フィルタ用の準備（1回だけ）
-    target_pref = normalize_text(pref_input)
-    target_city = normalize_text(city_input)
-    ken_df = None
-    town_tokens = set()
-    ken_hit_rows = 0
-
-    if target_pref and target_city:
-        ken_df = load_ken_all()
-        if ken_df is None:
-            st.warning("📂 KEN_ALL.xlsx / KEN_ALL.CSV がプロジェクト直下に見つかりませんでした。市区町村フィルタはスキップします。")
-        else:
-            town_tokens, ken_hit_rows = build_town_tokens(ken_df, target_pref, target_city)
-            if ken_hit_rows == 0:
-                st.warning(f"KEN_ALL から『{target_pref}{target_city}』に該当する町域行が見つかりませんでした。市区町村フィルタはスキップします。")
-
     for file_index, uploaded_file in enumerate(uploaded_files):
         st.markdown("---")
         st.markdown(f"## 📁 {uploaded_file.name}")
@@ -732,20 +726,19 @@ if uploaded_files:
         # --- 非電話列のみ正規化 ---
         df = clean_dataframe_except_phone(df)
 
+        # ★ 市区町村フィルタ（KEN_ALL の G/H/I を使用）
+        removed_by_city_filter = 0
+        if use_city_filter and town_tokens:
+            before_city = len(df)
+            df = df[df["住所"].apply(
+                lambda x: address_matches_city_towns(x, target_city, town_tokens)
+            )]
+            removed_by_city_filter = before_city - len(df)
+            st.info(f"🏙 市区町村フィルタ適用（{target_pref}{target_city}）：{removed_by_city_filter} 件を除外しました。")
+
         # --- 比較キー ---
         df["__company_canon"] = df["企業名"].map(canonical_company_name)
         df["__digits"] = df["電話番号"].map(phone_digits_only)
-
-        # --- 市区町村フィルタ ---
-        removed_by_city = 0
-        if target_pref and target_city and ken_df is not None and ken_hit_rows > 0:
-            before_city = len(df)
-            mask_city = df["住所"].map(
-                lambda a: address_in_target_city(a, target_pref, target_city, town_tokens)
-            )
-            df = df[mask_city].reset_index(drop=True)
-            removed_by_city = before_city - len(df)
-            st.info(f"🏙 市区町村フィルタ（{target_pref}{target_city}）：{removed_by_city}件を除外しました")
 
         # --- 業種フィルター（製造業のみ除外ルール適用） ---
         removed_by_industry = 0
@@ -763,7 +756,7 @@ if uploaded_files:
         df = df[~df["企業名"].str.contains(yugen_pattern, na=False)]
         removed_by_industry += before_yugen - len(df)
 
-        st.warning(f"🏭 フィルター適用：有限会社・業種フィルタなどで {removed_by_industry}件を除外しました（うち市区町村フィルタ {removed_by_city}件）")
+        st.warning(f"🏭 フィルター適用：有限会社・業種フィルタなどで {removed_by_industry}件を除外しました")
 
         # --- NG照合（任意） ---
         removal_logs = []
@@ -845,7 +838,7 @@ if uploaded_files:
         # --- サマリー＆削除ログDL ---
         with st.expander(f"📊 実行サマリー（詳細） - {uploaded_file.name}", expanded=False):
             st.markdown(
-                f"- 市区町村フィルタ除外: **{removed_by_city}** 件\n"
+                f"- 市区町村フィルタ除外: **{removed_by_city_filter}** 件\n"
                 f"- フィルター除外（製造業/有限会社など）: **{removed_by_industry}** 件\n"
                 f"- NG（企業名 部分一致）削除: **{company_removed}** 件\n"
                 f"- NG（電話 digits一致）削除: **{phone_removed}** 件\n"
@@ -941,7 +934,6 @@ if uploaded_files:
                     dv.add(sheet_k[cell_ref])
                     row += 6
             except Exception:
-                # DataValidation がうまく行かない場合は何もしない（エラーで止めない）
                 pass
 
             # 印刷範囲を A〜L 全行に設定

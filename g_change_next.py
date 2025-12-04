@@ -546,6 +546,7 @@ def clean_industry_noise(s: str) -> str:
     # 先頭の評価スコア + 件数
     t = re.sub(r"^\s*\d+(?:\.\d+)?\s*[\(（]\s*\d+\s*[\)）]\s*(?:件)?\s*[・･]?\s*", "", t)
 
+    # --- レビュー / クチコミ 処理 ---
     def norm_token(x: str) -> str:
         return re.sub(r"\s+", "", x)
 
@@ -573,10 +574,9 @@ def clean_industry_noise(s: str) -> str:
     t = "・".join(parts) if parts else ""
     t = re.sub(r"[・･]{2,}", "・", t).strip(" ・･")
 
-    if t:
-        for trash in ["·", "レビュ-なし"]:
-            t = t.replace(trash, "")
-        t = re.sub(r"\s+", " ", t).strip()
+    # --- 🎯 追加：末尾の特殊文字（絵文字・UI記号等）削除 ---
+    # 例： /  / ↗ / ★ など
+    t = re.sub(r"[^\w一-龥ぁ-んァ-ヶ・\s\-、,。/()（）]+$", "", t)
 
     return t if t else ""
 

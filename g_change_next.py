@@ -569,10 +569,6 @@ def address_matches_city_towns(address: str, city_name: str, town_tokens: set) -
         if token and token in t:
             return True
 
-    city = normalize_text(city_name)
-    if city and city in t:
-        return True
-
     return False
 
 
@@ -825,7 +821,7 @@ if uploaded_files:
         if use_city_filter and town_tokens:
             before_city = len(df)
             df = df[df["住所"].apply(
-                lambda x: address_matches_city_towns(x, target_city, town_tokens)
+                lambda x: address_matches_city_towns(x, town_tokens)
             )]
             removed_by_city_filter = before_city - len(df)
             st.info(f"🏙 市区町村フィルタ適用（{target_pref}{target_city}）：{removed_by_city_filter} 件を除外しました。")

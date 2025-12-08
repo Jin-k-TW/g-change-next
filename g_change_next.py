@@ -554,11 +554,10 @@ def build_city_town_dict():
     # キャッシュに載せやすいようにフリーズしておく
     return {k: frozenset(v) for k, v in city_town.items()}
 
-def address_matches_city_towns(address: str, city_name: str, town_tokens: set) -> bool:
+def address_matches_city_towns(address: str, town_tokens: set) -> bool:
     """
     住所が、指定市区町村の町域セットにマッチするかどうか。
     ・町名(I列)のどれかが住所に含まれていれば True
-    ・町名にヒットしなくても、市区町村名自体が住所に含まれていれば True
     それ以外は False（＝別地域とみなして除外）
     """
     t = normalize_text(address)

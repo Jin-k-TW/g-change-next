@@ -176,40 +176,101 @@ def extract_shigoto_arua(df_like: pd.DataFrame) -> pd.DataFrame:
         flush()
     return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
 
-# 3) 日本倉庫協会（4列）
+# 3) 日本倉庫協会（A=企業名, B=郵便番号＋住所, C=TEL/FAX, D=業種 型）
 def extract_warehouse_association(df_like: pd.DataFrame) -> pd.DataFrame:
+    """
+    ・C列に「TEL」を含む行が1レコード
+      - 同じ行の A列: 企業名の1行目
+      - 同じ行の B列: 郵便番号（〒xxx-xxxx）
+      - 同じ行の D列: 業種
+    ・A列の下に営業所名などが続く場合:
+        A(企業行+1) 以降で「空白 or 会社HP」が出るまでを順に結合して企業名とする
+    ・住所:
+        B(郵便番号行+1) 〜 次の郵便番号行の手前まで、
+        B列の非空セルを上から順に結合して1つの住所にする
+    """
     df = df_like.fillna("")
-    if df.shape[1] < 2:
-        return pd.DataFrame(columns=["企業名", "業種", "住所", "電話番号"])
+    # 列数が足りなければ4列まで埋める
     while df.shape[1] < 4:
         df[f"__pad{df.shape[1]}"] = ""
     df = df.iloc[:, :4]
-    df.columns = ["c0", "c1", "c2", "c3"]
+    df.columns = ["colA", "colB", "colC", "colD"]
 
-    tel_re = re.compile(r"(?:TEL|Tel|tel)\s*([0-9０-９\-ー－\s]+)")
-    out, current = [], {"企業名": "", "住所": "", "電話番号": "", "業種_set": set()}
+    n_rows = len(df)
 
-    def flush():
-        if current["企業名"]:
-            out.append([current["企業名"], "・".join(current["業種_set"]), current["住所"], current["電話番号"]])
-        current.update({"企業名": "", "住所": "", "電話番号": "", "業種_set": set()})
+    # 郵便番号判定用
+    def is_zip(x: str) -> bool:
+        t = normalize_text(x)
+        return bool(re.search(r"^〒?\d{3}-\d{4}", t))
 
-    for _, r in df.iterrows():
-        if r["c0"]:
-            if current["企業名"] and r["c0"] != current["企業名"]:
-                flush()
-            current["企業名"] = r["c0"]
-        if r["c1"]:
-            current["住所"] = clean_address(r["c1"])
-        if r["c2"]:
-            m = tel_re.search(r["c2"])
-            if m:
-                current["電話番号"] = m.group(1).strip()  # 原文保持
-        if r["c3"]:
-            current["業種_set"].add(extract_industry(r["c3"]))
-    if current["企業名"]:
-        flush()
-    return pd.DataFrame(out, columns=["企業名", "業種", "住所", "電話番号"])
+    # B列の郵便番号行インデックス一覧
+    zip_rows = [i for i, v in enumerate(df["colB"]) if is_zip(v)]
+    if not zip_rows:
+        return pd.DataFrame(columns=["企業名", "業種", "住所", "電話番号"])
+
+    # 次の郵便番号行を探しやすいように末尾に番兵を追加
+    zip_rows_sorted = sorted(zip_rows)
+    zip_rows_sorted.append(n_rows)
+
+    # 郵便番号行ごとの「次の郵便番号行」マップ
+    zip_to_next = {}
+    for idx in range(len(zip_rows_sorted) - 1):
+        zip_to_next[zip_rows_sorted[idx]] = zip_rows_sorted[idx + 1]
+
+    results = []
+
+    for start in zip_rows_sorted[:-1]:
+        end = zip_to_next[start]  # この郵便番号ブロックの終わり（次の郵便番号行）
+
+        # C列に TEL がなければレコードとして扱わない
+        c_text = normalize_text(df.at[start, "colC"])
+        if "TEL" not in c_text.upper():
+            continue
+
+        # --- 電話番号 ---
+        phone = pick_phone_token_raw(c_text)
+
+        # --- 業種（同じ行のD列）---
+        industry = extract_industry(df.at[start, "colD"])
+
+        # --- 企業名（A列）---
+        company_lines = []
+        first_name = normalize_text(df.at[start, "colA"])
+        if first_name:
+            company_lines.append(first_name)
+
+        # A列で、下方向に「空 or 会社HP」が出るまでを結合
+        for r in range(start + 1, end):
+            a_val = normalize_text(df.at[r, "colA"])
+            if not a_val or a_val == "会社HP":
+                break
+            company_lines.append(a_val)
+
+        company = "".join(company_lines)
+
+        # --- 住所（B列）---
+        address_lines = []
+        for r in range(start + 1, end):
+            b_val = normalize_text(df.at[r, "colB"])
+            if not b_val:
+                continue
+            # 郵便番号行は除外（start+1以降なので基本来ないが一応）
+            if is_zip(b_val):
+                break
+            address_lines.append(b_val)
+
+        address = "".join(address_lines)
+
+        # どれも空ならスキップ
+        if not (company or address or phone):
+            continue
+
+        results.append([company, industry, clean_address(address), phone])
+
+    if not results:
+        return pd.DataFrame(columns=["企業名", "業種", "住所", "電話番号"])
+
+    return pd.DataFrame(results, columns=["企業名", "業種", "住所", "電話番号"])
 
 
 # ===============================
